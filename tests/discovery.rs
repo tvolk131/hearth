@@ -1022,7 +1022,7 @@ fn foreign_databases_are_refused() {
         let database = Database::create(&controller).unwrap();
         let transaction = database.begin_write().unwrap();
         transaction
-            .open_table(TableDefinition::<u8, &[u8]>::new("controller_catalog_v1"))
+            .open_table(pve_dev::control::catalog_tables::META)
             .unwrap();
         transaction.commit().unwrap();
     }

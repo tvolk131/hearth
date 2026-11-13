@@ -9,7 +9,6 @@ use pve_dev::control::{
     store::{Binding, Store},
     transport::{self, Network, ServerConfig},
 };
-use redb::ReadableTable;
 use serde_json::{Value, json};
 
 const ENV: &str = "0123456789abcdef0123456789abcdef";
@@ -713,15 +712,10 @@ fn physical_schema_downgrade_fence_survives_policy_and_deletion_transitions() {
     let tx = db.begin_write().unwrap();
     {
         let mut table = tx
-            .open_table(redb::TableDefinition::<u8, &[u8]>::new(
-                "controller_catalog_v1",
-            ))
+            .open_table(pve_dev::control::catalog_tables::META)
             .unwrap();
-        let mut catalog: Value =
-            serde_json::from_slice(table.get(0).unwrap().unwrap().value()).unwrap();
-        catalog["schema"] = json!(3);
         table
-            .insert(0, serde_json::to_vec(&catalog).unwrap().as_slice())
+            .insert("schema", serde_json::to_vec(&json!(3)).unwrap().as_slice())
             .unwrap();
     }
     tx.commit().unwrap();

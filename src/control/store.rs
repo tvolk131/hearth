@@ -6,15 +6,14 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, Durability, ReadableDatabase};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use super::catalog_tables;
 use super::protocol::*;
 use super::shrink::{PendingShrink, ShrinkPlan, ShrinkSpec};
-
-const CATALOG: TableDefinition<u8, &[u8]> = TableDefinition::new("controller_catalog_v1");
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Binding {
@@ -791,6 +790,11 @@ impl Store {
         let store = Self {
             database: Database::create(path)?,
         };
+        catalog_tables::check_layout(&store.database)?;
+        ensure!(
+            store.database.begin_read()?.list_tables()?.next().is_none(),
+            "controller database already exists"
+        );
         store.write_catalog(&catalog)?;
         std::fs::File::open(path.parent().context("database has no parent")?)?.sync_all()?;
         Ok(store)
@@ -801,6 +805,7 @@ impl Store {
         let store = Self {
             database: Database::open(path)?,
         };
+        catalog_tables::check_layout(&store.database)?;
         let catalog = store.read()?;
         validate_scope(&catalog)?;
         ensure!(
@@ -814,21 +819,16 @@ impl Store {
         let mut transaction = self.database.begin_write()?;
         transaction.set_durability(Durability::Immediate)?;
         {
-            let mut table = transaction.open_table(CATALOG)?;
-            let bytes = serde_json::to_vec(catalog)?;
-            table.insert(0, bytes.as_slice())?;
+            catalog_tables::create_tables(&transaction)?;
+            catalog_tables::write_changes(&transaction, None, catalog)?;
         }
         transaction.commit()?;
         Ok(())
     }
 
+    /// A consistent snapshot of the whole catalog, from a read transaction.
     pub fn read(&self) -> Result<Catalog> {
-        let transaction = self.database.begin_read()?;
-        let table = transaction.open_table(CATALOG)?;
-        let bytes = table
-            .get(0)?
-            .context("controller catalog missing; refusing initialization")?;
-        Ok(serde_json::from_slice(bytes.value())?)
+        catalog_tables::load_read(&self.database.begin_read()?)
     }
 
     pub fn change<T>(
@@ -839,26 +839,23 @@ impl Store {
         transaction
             .set_durability(Durability::Immediate)
             .map_err(internal)?;
-        let result;
-        {
-            let mut table = transaction.open_table(CATALOG).map_err(internal)?;
-            let mut catalog: Catalog = {
-                let bytes = table
-                    .get(0)
-                    .map_err(internal)?
-                    .ok_or_else(|| failure("internal", "catalog missing"))?;
-                serde_json::from_slice(bytes.value()).map_err(internal)?
-            };
-            validate_scope(&catalog).map_err(internal)?;
-            result = action(&mut catalog)?;
-            validate_scope(&catalog).map_err(internal)?;
-            catalog.revision = catalog
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| failure("internal", "catalog revision exhausted"))?;
-            let bytes = serde_json::to_vec(&catalog).map_err(internal)?;
-            table.insert(0, bytes.as_slice()).map_err(internal)?;
+        let before = catalog_tables::load_write(&transaction).map_err(internal)?;
+        validate_scope(&before).map_err(internal)?;
+        let mut catalog = before.clone();
+        let result = action(&mut catalog)?;
+        let unchanged = serde_json::to_value(&catalog).map_err(internal)?
+            == serde_json::to_value(&before).map_err(internal)?;
+        if unchanged {
+            // Read-only requests leave no trace: no write, no revision bump.
+            transaction.abort().map_err(internal)?;
+            return Ok(result);
         }
+        validate_scope(&catalog).map_err(internal)?;
+        catalog.revision = catalog
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| failure("internal", "catalog revision exhausted"))?;
+        catalog_tables::write_changes(&transaction, Some(&before), &catalog).map_err(internal)?;
         transaction.commit().map_err(internal)?;
         Ok(result)
     }

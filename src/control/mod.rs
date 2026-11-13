@@ -1,4 +1,5 @@
 pub mod adoption;
+pub mod catalog_tables;
 pub mod guest;
 pub mod host;
 pub mod job_kind;

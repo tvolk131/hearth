@@ -28,6 +28,8 @@ SwiftUI app ── typed JSON over stdin/stdout ── pve-devctl
 
 The authoritative `state.redb` lives on the controller host in its private data directory, not in each GUI. In the disposable real lab this is `/var/lib/pve-dev/controller/state.redb`; the helper's separate journal lives under `/var/lib/pve-dev-host`. Clients need only their identity key and profile. The Swift app additionally stores a private pending-request ledger locally; that ledger is not authoritative infrastructure state.
 
+`state.redb` holds one table per entity (`catalog_users_v2`, `catalog_vms_v2`, `catalog_operations_v2`, `catalog_requests_v2`, `catalog_audit_v2` and so on, plus `catalog_meta_v2` for schema, binding and revision), with JSON row values. Each admission loads the catalog inside its write transaction, applies the change in memory, and writes back only the rows that differ. A request that changes nothing (every read, and every rejected mutation) aborts its transaction: nothing is written and the catalog revision does not move. `Store::open` refuses the retired single-record `controller_catalog_v1` layout and any table it does not own.
+
 1. An authenticated request is validated, deduplicated, and admitted in one redb write transaction. The resource claim, frozen job and queued operation are committed with immediate durability before success is returned.
 2. An asynchronous worker submits the frozen job to the local helper. Repeated submissions carry the same operation ID and are deduplicated there too.
 3. The helper commits an intent before each external effect, stores the actual Proxmox task ID when available, observes task completion and exact postconditions, and durably verifies the step.

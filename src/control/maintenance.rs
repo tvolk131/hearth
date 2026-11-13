@@ -15,13 +15,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{
+    catalog_tables,
     host::{self, Journal, MachineState, World},
     protocol::{AccountState, OperationStatus, VmState},
     store::Catalog,
     transport::ServerConfig,
 };
 
-const CATALOG: TableDefinition<u8, &[u8]> = TableDefinition::new("controller_catalog_v1");
 const JOURNAL: TableDefinition<u8, &[u8]> = TableDefinition::new("host_journal_v1");
 const LIMIT: u64 = 64 * 1024 * 1024;
 pub const QUARANTINE: &str = "restore-review-required";
@@ -207,10 +207,39 @@ fn read_record<T: serde::de::DeserializeOwned>(
     Ok(serde_json::from_slice(row.value())?)
 }
 
+fn read_catalog(db: &Database) -> Result<Catalog> {
+    catalog_tables::check_layout(db)?;
+    let catalog = catalog_tables::load_read(&db.begin_read()?)?;
+    ensure!(
+        serde_json::to_vec(&catalog)?.len() as u64 <= LIMIT,
+        "controller catalog exceeds maintenance size limit"
+    );
+    Ok(catalog)
+}
+
 fn write_record(
     path: &Path,
     table: TableDefinition<u8, &[u8]>,
     value: &impl Serialize,
+) -> Result<()> {
+    create_database(path, |tx| {
+        tx.open_table(table)?
+            .insert(0, serde_json::to_vec(value)?.as_slice())?;
+        Ok(())
+    })
+}
+
+fn write_catalog(path: &Path, catalog: &Catalog) -> Result<()> {
+    create_database(path, |tx| {
+        catalog_tables::create_tables(tx)?;
+        catalog_tables::write_changes(tx, None, catalog)?;
+        Ok(())
+    })
+}
+
+fn create_database(
+    path: &Path,
+    fill: impl FnOnce(&redb::WriteTransaction) -> Result<()>,
 ) -> Result<()> {
     let file = OpenOptions::new()
         .read(true)
@@ -221,8 +250,7 @@ fn write_record(
     let db = Database::builder().create_file(file)?;
     let mut tx = db.begin_write()?;
     tx.set_durability(Durability::Immediate)?;
-    tx.open_table(table)?
-        .insert(0, serde_json::to_vec(value)?.as_slice())?;
+    fill(&tx)?;
     tx.commit()?;
     drop(db);
     fs::File::open(path)?.sync_all()?;
@@ -482,7 +510,7 @@ pub fn backup(
         created_at: super::store::now(),
         config: serde_json::from_slice(&read(&controller.join("config.json"))?)?,
         identity: read(&controller.join("identity.key"))?,
-        catalog: read_record(&controller_lock, CATALOG)?,
+        catalog: read_catalog(&controller_lock)?,
         journal: read_record(&helper_lock, JOURNAL)?,
         simulated_world: simulated_world
             .map(|path| -> Result<World> { Ok(serde_json::from_slice(&read(path)?)?) })
@@ -976,11 +1004,7 @@ pub fn restore(input: &Path, output: &Path, pins: &Pins, expected_bundle: &str) 
         &controller.join("config.json"),
         &serde_json::to_vec_pretty(&bundle.payload.config)?,
     )?;
-    write_record(
-        &controller.join("state.redb"),
-        CATALOG,
-        &bundle.payload.catalog,
-    )?;
+    write_catalog(&controller.join("state.redb"), &bundle.payload.catalog)?;
     write_record(
         &helper.join("host-journal.redb"),
         JOURNAL,
