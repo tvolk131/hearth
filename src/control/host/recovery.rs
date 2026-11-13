@@ -31,9 +31,11 @@ impl Host {
         })
     }
     async fn recovery_probe(&self, context: &Context, quick: bool) -> Result<Value> {
-        match context.kind.as_str() {
-            "start" if self.binding.managed.is_some() => self.inspect_failed_start(context).await,
-            "shrink_vm" | "finish_vm_shrink" => {
+        match context.kind {
+            JobKind::Start if self.binding.managed.is_some() => {
+                self.inspect_failed_start(context).await
+            }
+            JobKind::ShrinkVm | JobKind::FinishVmShrink => {
                 let mut inspected = context.clone();
                 if !quick && context.kind == JobKind::ShrinkVm {
                     // A shrink abort receipt belongs to the recovery that
@@ -65,7 +67,7 @@ impl Host {
                 }
                 self.inspect_shrink(&inspected, quick).await
             }
-            "grow_vm" => {
+            JobKind::GrowVm => {
                 if quick {
                     self.inspect_growth_quick(context).await
                 } else {
@@ -299,12 +301,12 @@ impl Host {
                         .get(pending.step.name())
                         .cloned()
                         .context("full inspection cannot prove the incomplete effect")?;
-                    match target.kind.as_str() {
-                        "grow_vm" => {
+                    match target.kind {
+                        JobKind::GrowVm => {
                             self.accept_growth_proof(&target, pending.step, proof)
                                 .await?
                         }
-                        "shrink_vm" | "finish_vm_shrink" => {
+                        JobKind::ShrinkVm | JobKind::FinishVmShrink => {
                             self.accept_shrink_proof(&target, pending.step, proof)
                                 .await?
                         }

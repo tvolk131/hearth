@@ -1423,6 +1423,43 @@ async fn unix_socket_rpc_serves_bounded_single_responses() {
     stream.read_to_string(&mut reply).await.unwrap();
     assert!(reply.contains("\"ok\":false"), "{reply}");
 
+    // A job naming a kind outside the closed set is refused at decode time and
+    // leaves no journal record behind.
+    let mut wire = serde_json::to_value(HostRequest::Submit {
+        environment: ENV.into(),
+        job: job(
+            "bad-kind",
+            "create",
+            &alice,
+            Some(machine(9002, "alice", "kind", 32)),
+        ),
+    })
+    .unwrap();
+    wire["job"]["kind"] = "resize".into();
+    let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    stream
+        .write_all(&serde_json::to_vec(&wire).unwrap())
+        .await
+        .unwrap();
+    stream.shutdown().await.unwrap();
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).await.unwrap();
+    assert!(reply.contains("\"ok\":false"), "{reply}");
+    assert!(reply.contains("invalid request"), "{reply}");
+    let error = rpc(
+        &socket,
+        &HostRequest::Status {
+            environment: ENV.into(),
+            operation_id: "bad-kind".into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("unknown helper operation"),
+        "{error}"
+    );
+
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let oversized = vec![b' '; 300 * 1024];
     let _ = stream.write_all(&oversized).await;

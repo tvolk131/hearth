@@ -3579,22 +3579,33 @@ impl Host {
                 .with_context(|| format!("{} step {}", context.kind, step.name()))?;
         }
         self.change(|journal| {
-            match context.kind.as_str() {
-                "ensure_user" => {
+            match context.kind {
+                JobKind::EnsureUser => {
                     journal
                         .owners
                         .get_mut(&context.owner)
                         .expect("admitted owner")
                         .ready = true
                 }
-                "create" | "create_guest" | "enroll_vm" => {
+                JobKind::Create | JobKind::CreateGuest | JobKind::EnrollVm => {
                     journal
                         .machines
                         .get_mut(&context.vm_id())
                         .expect("preflighted machine")
                         .state = MachineState::Present
                 }
-                _ => {}
+                JobKind::Start
+                | JobKind::Shutdown
+                | JobKind::Stop
+                | JobKind::Delete
+                | JobKind::DeleteUser
+                | JobKind::UpdateUserPolicy
+                | JobKind::GrowVm
+                | JobKind::ShrinkVm
+                | JobKind::FinishVmShrink
+                | JobKind::RecoverOperation
+                | JobKind::Migration
+                | JobKind::Inspect => {}
             }
             let job = journal.jobs.get_mut(operation_id).expect("running job");
             job.status = OperationStatus::Verified;
@@ -3797,13 +3808,13 @@ impl Host {
                         "VM {} ownership or profile differs from helper history",
                         vm.vm_id
                     );
-                    let allowed = match context.kind.as_str() {
-                        "create" | "create_guest" | "enroll_vm" => {
+                    let allowed = match context.kind {
+                        JobKind::Create | JobKind::CreateGuest | JobKind::EnrollVm => {
                             machine.create_operation == context.operation_id
                                 && machine.state == MachineState::Creating
                         }
-                        "start" | "stop" | "shutdown" | "shrink_vm" | "finish_vm_shrink" | "grow_vm" => machine.state == MachineState::Present,
-                        "delete" => {
+                        JobKind::Start | JobKind::Stop | JobKind::Shutdown | JobKind::ShrinkVm | JobKind::FinishVmShrink | JobKind::GrowVm => machine.state == MachineState::Present,
+                        JobKind::Delete => {
                             machine.state == MachineState::Present
                                 || (matches!(
                                     machine.state,
@@ -3811,7 +3822,12 @@ impl Host {
                                 ) && machine.delete_operation.as_deref()
                                     == Some(&context.operation_id))
                         }
-                        _ => false,
+                        JobKind::EnsureUser
+                        | JobKind::DeleteUser
+                        | JobKind::UpdateUserPolicy
+                        | JobKind::RecoverOperation
+                        | JobKind::Migration
+                        | JobKind::Inspect => false,
                     };
                     ensure!(
                         allowed,

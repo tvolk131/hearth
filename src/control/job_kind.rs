@@ -79,11 +79,6 @@ impl JobKind {
     pub const fn is_lifecycle(self) -> bool {
         matches!(self, JobKind::Start | JobKind::Shutdown | JobKind::Stop)
     }
-
-    /// Either kind of VM creation.
-    pub const fn is_create(self) -> bool {
-        matches!(self, JobKind::Create | JobKind::CreateGuest)
-    }
 }
 
 impl fmt::Display for JobKind {

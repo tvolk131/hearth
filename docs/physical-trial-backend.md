@@ -6,7 +6,7 @@ The root-owned private trial config pins the actual node, pool GUID, exact `/etc
 
 All managed resources lie under `<trial-root>/control`, which must be absent when a fresh helper journal starts. Only `trial-admin` and `trial-user` are supported; their storage IDs use the environment-specific `trial-<nonce-prefix>-` prefix. At most four explicitly listed VM IDs in 9001–9099 can be allocated. Both controller admission and the helper independently enforce these bounds, including loaded journal/catalog history. Existing guests and allocations remain unmanaged.
 
-Physical trials initialize catalog and helper schema 4. Older binaries reject that schema; policy edits and account deletion retain the schema-4 fence. Legacy backends keep schemas 1–3 and omit the new optional binding field, preserving historical job fingerprints and default binding JSON. Upgrade controller and helper together.
+Physical trials initialize catalog and helper schema 4. Older binaries reject that schema; policy edits and account deletion retain the schema-4 fence. Legacy backends keep schemas 1–3 and omit the new optional binding field, preserving default binding JSON. Upgrade controller and helper together.
 
 ## Startup and transport
 

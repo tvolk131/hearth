@@ -23,7 +23,7 @@ Suggested systemd shape: `User=root`, `Group=pve-dev`, `RuntimeDirectory=pve-dev
 Each connection sends one JSON request, half-closes its write side, and reads one JSON reply until EOF. Both directions are limited to 256 KiB, with timeouts of 5 s to connect and 30 s for the exchange.
 
 - `{"action":"health"}` checks the host identity and the journal. It returns `status: verified`, `step: healthy`, and the configured environment.
-- `{"action":"submit","environment":E,"job":Job}` stores the whole job and its SHA-256 fingerprint in redb with `Durability::Immediate`, then replies. If the same operation ID arrives with the same payload, it gets the stored outcome. A different payload is an error.
+- `{"action":"submit","environment":E,"job":Job}` stores the whole job and its fingerprint (SHA-256 over a `hearth-job-v1` tag and the job's key-sorted JSON) in redb with `Durability::Immediate`, then replies. If the same operation ID arrives with the same payload, it gets the stored outcome. A different payload is an error.
 - `{"action":"status","environment":E,"operation_id":ID}` returns the stored outcome. An unknown ID is an error.
 
 Internally, replies use the envelope `{"ok":true,"response":HostResponse}` or `{"ok":false,"error":...}`. `rpc` turns `ok:false` into an `anyhow` error. The parent should treat that error as a transport or retry condition, not a terminal job outcome. A job outcome is terminal only when it is a `HostResponse` with `status: blocked`. Invalid profiles, names, VMIDs, budgets or kinds are recorded as `blocked` with `step: rejected`, and the outcome stays durable.
