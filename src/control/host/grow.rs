@@ -5,6 +5,12 @@ use crate::control::vm_change::{GrowthSpec, JobExtension};
 
 const SHARED_WORKER: &str = include_str!("../shrink_worker.py");
 const GROW_WORKER: &str = include_str!("../grow_worker.py");
+/// Both sources are fixed at compile time. `__name__` prevents the shared
+/// library's separate shrink entrypoint from running.
+pub(super) fn grow_script() -> String {
+    format!("__name__='pve_dev_resize_shared'\n{SHARED_WORKER}\n__name__='__main__'\n{GROW_WORKER}")
+}
+
 const GROW_SOURCE_KEYS: &[&str] = &[
     "type",
     "guid",
@@ -144,74 +150,20 @@ impl Host {
                             .context("target size missing")?,
                     ),
                 );
-                // Both sources are fixed at compile time. __name__ prevents
-                // the shared library's separate shrink entrypoint from running.
-                let script = format!(
-                    "__name__='pve_dev_resize_shared'\n{SHARED_WORKER}\n__name__='__main__'\n{GROW_WORKER}"
-                );
-                let mut command = tokio::process::Command::new("python3");
-                command
-                    .args(["-I", "-c", &script, &serde_json::to_string(input)?])
-                    .gid(0)
-                    .env_clear()
-                    .env("PATH", SAFE_PATH)
-                    .env("LC_ALL", "C")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .kill_on_drop(true);
-                let mut child = command.spawn()?;
-                let pid = child.id().context("growth worker PID missing")?;
-                let mut stdout = child.stdout.take().context("growth stdout missing")?;
-                let mut stderr = child.stderr.take().context("growth stderr missing")?;
-                let output = tokio::spawn(async move {
-                    let mut bytes = Vec::new();
-                    stdout.read_to_end(&mut bytes).await.map(|_| bytes)
-                });
-                let errors = tokio::spawn(async move {
-                    let mut bytes = Vec::new();
-                    stderr.read_to_end(&mut bytes).await.map(|_| bytes)
-                });
-                let status = match timeout(budget, child.wait()).await {
-                    Ok(result) => result?,
-                    Err(_) => {
-                        tokio::process::Command::new("/bin/kill")
-                            .args(["-TERM", &pid.to_string()])
-                            .status()
-                            .await?;
-                        if timeout(Duration::from_secs(30), child.wait())
-                            .await
-                            .is_err()
-                        {
-                            child.kill().await?;
-                        }
-                        let _ = child.wait().await;
-                        output.abort();
-                        errors.abort();
-                        bail!(
-                            "growth adapter timed out; inspect retained operation state before recovery"
-                        )
-                    }
-                };
-                let bytes = output.await??;
-                let detail = errors.await??;
-                ensure!(
-                    status.success(),
-                    "growth adapter failed: {}",
-                    String::from_utf8_lossy(&detail)
-                        .chars()
-                        .rev()
-                        .take(2500)
-                        .collect::<String>()
-                        .chars()
-                        .rev()
-                        .collect::<String>()
-                );
-                ensure!(
-                    bytes.len() <= MAX_HOST_MESSAGE,
-                    "growth proof exceeds message limit"
-                );
-                Ok(serde_json::from_slice(&bytes)?)
+                let script = grow_script();
+                Worker {
+                    label: "growth adapter",
+                    script: &script,
+                    args: &[],
+                    input: Some(input),
+                    budget,
+                    grace: DEFAULT_GRACE,
+                    max_output: MAX_HOST_MESSAGE,
+                    gid: Some(0),
+                    timeout_hint: "inspect retained operation state before recovery",
+                }
+                .run_json()
+                .await
             }
             Backend::Simulated(world) => self.simulate_growth(world, input),
         }

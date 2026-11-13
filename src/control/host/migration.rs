@@ -8,7 +8,7 @@ use crate::control::migration::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use std::{os::unix::fs::FileExt, sync::OnceLock};
 
-const WORKER: &str = include_str!("../migration_worker.py");
+pub(super) const WORKER: &str = include_str!("../migration_worker.py");
 const KEYS: &[&str] = &[
     "type",
     "guid",
@@ -206,37 +206,19 @@ impl Host {
         }
         match &self.backend {
             Backend::Lab(_) => {
-                let output = tokio::process::Command::new("python3")
-                    .args(["-I", "-c", WORKER, &serde_json::to_string(&p)?])
-                    .gid(0)
-                    .env_clear()
-                    .env("PATH", SAFE_PATH)
-                    .env("LC_ALL", "C")
-                    .stdin(Stdio::null())
-                    .kill_on_drop(true)
-                    .output();
-                let output = timeout(disk_maintenance_timeout(context.vm()?.disk_mib), output)
-                    .await
-                    .context(
-                        "migration adapter timed out; inspect retained state without replay",
-                    )??;
-                ensure!(
-                    output.status.success(),
-                    "migration adapter failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                        .chars()
-                        .rev()
-                        .take(2000)
-                        .collect::<String>()
-                        .chars()
-                        .rev()
-                        .collect::<String>()
-                );
-                ensure!(
-                    output.stdout.len() <= MAX_HOST_MESSAGE,
-                    "migration proof exceeds helper message bound"
-                );
-                Ok(serde_json::from_slice(&output.stdout)?)
+                Worker {
+                    label: "migration adapter",
+                    script: WORKER,
+                    args: &[],
+                    input: Some(&p),
+                    budget: disk_maintenance_timeout(context.vm()?.disk_mib),
+                    grace: DEFAULT_GRACE,
+                    max_output: MAX_HOST_MESSAGE,
+                    gid: Some(0),
+                    timeout_hint: "inspect retained state without replay",
+                }
+                .run_json()
+                .await
             }
             Backend::Simulated(world) => {
                 self.migration_simulate(world, context, action, record, extra)

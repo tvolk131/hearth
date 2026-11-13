@@ -336,7 +336,7 @@ def grow_main(p):
 if __name__ == "__main__":
     if "configure_scope" not in globals():
         raise RuntimeError("grow adapter requires the compiled-in fixed resize helpers")
-    parameters = json.loads(sys.argv[1])
+    parameters = json.loads(sys.stdin.read())
     parent = os.getppid()
     require(parent == parameters["helper_pid"] and parent > 1, "unexpected helper parent")
     signal.signal(signal.SIGTERM, stop_child)

@@ -9,6 +9,7 @@ description = "Hearth: a multi-user Proxmox control plane"
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4.6", features = ["derive"] }
+libc = "0.2"
 iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
 redb = "3"
 serde = { version = "1", features = ["derive"] }

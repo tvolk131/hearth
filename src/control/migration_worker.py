@@ -415,7 +415,7 @@ def main(p):
         return cleanup(p,record,True)
     raise RuntimeError('unsupported migration worker action')
 if __name__=='__main__':
-    parameters=json.loads(sys.argv[1])
+    parameters=json.loads(sys.stdin.read())
     signal.signal(signal.SIGTERM,stop_child);signal.signal(signal.SIGINT,stop_child)
     require(ctypes.CDLL(None).prctl(1,signal.SIGTERM,0,0,0)==0,'cannot bind migration adapter to helper lifetime')
     require(os.getppid()==parameters['helper_pid'],'migration helper exited before adapter initialization')
