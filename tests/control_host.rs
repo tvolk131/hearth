@@ -172,12 +172,12 @@ fn guest_plan_cannot_be_downgraded_to_blank_disk_creation() {
         .is_err()
     );
     assert!(
-        !pve_dev::control::host::plan("create")
+        !pve_dev::control::host::plan(pve_dev::control::JobKind::Create)
             .unwrap()
             .contains(&Step::Image)
     );
     assert!(
-        pve_dev::control::host::plan("create_guest")
+        pve_dev::control::host::plan(pve_dev::control::JobKind::CreateGuest)
             .unwrap()
             .contains(&Step::Image)
     );
@@ -308,7 +308,7 @@ fn machine(vm_id: u16, owner: &str, name: &str, disk_mib: u64) -> Vm {
 fn job(operation_id: &str, kind: &str, owner: &User, vm: Option<Vm>) -> Job {
     Job {
         operation_id: operation_id.into(),
-        kind: kind.into(),
+        kind: kind.parse().unwrap(),
         owner: owner.clone(),
         vm,
         disk_shrink: None,
@@ -460,12 +460,6 @@ async fn invalid_jobs_are_durably_rejected_without_effects() {
             &alice,
             Some(machine(9002, "bob", "owner", 32)),
         ),
-        job(
-            "bad-kind",
-            "resize",
-            &alice,
-            Some(machine(9002, "alice", "kind", 32)),
-        ),
         job("bad-user", "ensure_user", &user("Root", 128), None),
         job("bad-budget", "ensure_user", &user("carol", 8193), None),
     ];
@@ -476,6 +470,20 @@ async fn invalid_jobs_are_durably_rejected_without_effects() {
         assert_eq!(response.step, "rejected");
         assert_eq!(submit(&host, case).await, response);
     }
+    // An unknown kind cannot be decoded into a request, so it is refused at
+    // the socket before it reaches the journal.
+    let mut wire = serde_json::to_value(HostRequest::Submit {
+        environment: ENV.into(),
+        job: job(
+            "bad-kind",
+            "create",
+            &alice,
+            Some(machine(9002, "alice", "kind", 32)),
+        ),
+    })
+    .unwrap();
+    wire["job"]["kind"] = "resize".into();
+    assert!(serde_json::from_value::<HostRequest>(wire).is_err());
     host.run_pending().await.unwrap();
     let world = lab.snapshot();
     assert!(world.vms.is_empty());
@@ -1415,6 +1423,43 @@ async fn unix_socket_rpc_serves_bounded_single_responses() {
     stream.read_to_string(&mut reply).await.unwrap();
     assert!(reply.contains("\"ok\":false"), "{reply}");
 
+    // A job naming a kind outside the closed set is refused at decode time and
+    // leaves no journal record behind.
+    let mut wire = serde_json::to_value(HostRequest::Submit {
+        environment: ENV.into(),
+        job: job(
+            "bad-kind",
+            "create",
+            &alice,
+            Some(machine(9002, "alice", "kind", 32)),
+        ),
+    })
+    .unwrap();
+    wire["job"]["kind"] = "resize".into();
+    let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    stream
+        .write_all(&serde_json::to_vec(&wire).unwrap())
+        .await
+        .unwrap();
+    stream.shutdown().await.unwrap();
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).await.unwrap();
+    assert!(reply.contains("\"ok\":false"), "{reply}");
+    assert!(reply.contains("invalid request"), "{reply}");
+    let error = rpc(
+        &socket,
+        &HostRequest::Status {
+            environment: ENV.into(),
+            operation_id: "bad-kind".into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("unknown helper operation"),
+        "{error}"
+    );
+
     let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
     let oversized = vec![b' '; 300 * 1024];
     let _ = stream.write_all(&oversized).await;
@@ -1428,4 +1473,35 @@ async fn unix_socket_rpc_serves_bounded_single_responses() {
 
     server.abort();
     let _ = server.await;
+}
+
+#[test]
+fn job_fingerprint_is_canonical_and_versioned() {
+    // Canonical JSON relies on serde_json's sorted map; enabling the
+    // `preserve_order` feature anywhere in the build would silently break it.
+    assert_eq!(
+        serde_json::to_string(&serde_json::json!({"b": 1, "a": 2})).unwrap(),
+        r#"{"a":2,"b":1}"#
+    );
+    let alice = user("alice", 128);
+    let job = job(
+        "fp",
+        "create",
+        &alice,
+        Some(machine(9002, "alice", "fp", 32)),
+    );
+    let canonical = serde_json::to_vec(&serde_json::to_value(&job).unwrap()).unwrap();
+    let mut expected = <sha2::Sha256 as sha2::Digest>::new();
+    sha2::Digest::update(&mut expected, b"hearth-job-v1\n");
+    sha2::Digest::update(&mut expected, &canonical);
+    let fingerprint = pve_dev::control::host::fingerprint(&job).unwrap();
+    assert_eq!(
+        fingerprint,
+        format!("{:x}", sha2::Digest::finalize(expected))
+    );
+    // The domain tag keeps it distinct from the unversioned hash of the same bytes.
+    assert_ne!(
+        fingerprint,
+        format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&canonical))
+    );
 }

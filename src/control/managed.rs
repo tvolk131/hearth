@@ -5,6 +5,7 @@ use super::{
     protocol::{ImageCatalogEntry, ImportedVm, ResourceLimits, ResourcePolicy, Role},
     store::Job,
 };
+use crate::control::JobKind;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -349,21 +350,21 @@ impl ManagedBinding {
         if let Some(row) = job.vm.as_ref().and_then(|v| self.adopted(v.vm_id)) {
             return row.validate_job(job, self);
         }
-        let failed_start_recovery = job.kind == "recover_operation"
+        let failed_start_recovery = job.kind == JobKind::RecoverOperation
             && job.vm.is_some()
             && matches!(job.extension.as_deref(), Some(super::vm_change::JobExtension::Recover(spec))
                 if spec.kind == super::vm_change::RecoveryKind::AcknowledgeFailedStart);
         ensure!(
             (matches!(
-                job.kind.as_str(),
-                "ensure_user"
-                    | "update_user_policy"
-                    | "delete_user"
-                    | "create_guest"
-                    | "start"
-                    | "shutdown"
-                    | "stop"
-                    | "delete"
+                job.kind,
+                JobKind::EnsureUser
+                    | JobKind::UpdateUserPolicy
+                    | JobKind::DeleteUser
+                    | JobKind::CreateGuest
+                    | JobKind::Start
+                    | JobKind::Shutdown
+                    | JobKind::Stop
+                    | JobKind::Delete
             ) && job.extension.is_none()
                 || failed_start_recovery)
                 && job.disk_shrink.is_none(),

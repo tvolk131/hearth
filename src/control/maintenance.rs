@@ -1,5 +1,6 @@
 //! Offline paired journal export and quarantined restoration. This is not a
 //! reconciliation or activation API: restored state must never start workers.
+use crate::control::JobKind;
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
@@ -348,7 +349,7 @@ fn validate(payload: &Payload, pins: &Pins) -> Result<()> {
                 .and_then(|id| payload.catalog.operations.get(id))
                 .context("deleted owner lacks its retained controller deletion operation")?;
             ensure!(
-                operation.public.kind == "delete_user"
+                operation.public.kind == JobKind::DeleteUser
                     && operation.public.owner == *id
                     && operation.public.status == OperationStatus::Verified
                     && operation.job.owner.role == super::protocol::Role::Member
@@ -1333,10 +1334,10 @@ mod managed_backup_tests {
             .unwrap()
             .clone();
         op.public.operation_id = "existing-shutdown".into();
-        op.public.kind = "shutdown".into();
+        op.public.kind = JobKind::Shutdown;
         op.public.vm_id = Some(vm_id);
         op.job.operation_id = op.public.operation_id.clone();
-        op.job.kind = "shutdown".into();
+        op.job.kind = JobKind::Shutdown;
         op.job.owner = source.payload.catalog.users["erin"].clone();
         op.job.vm = Some(source.payload.catalog.vms[&vm_id].clone());
         let mut host_job = source.payload.journal.jobs.values().next().unwrap().clone();

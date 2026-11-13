@@ -1,5 +1,6 @@
 //! Managed-only read observations and admission; no existing-resource effects.
 use super::*;
+use crate::control::JobKind;
 
 pub(super) async fn verify_initial_imports(backend: &Backend, binding: &HostBinding) -> Result<()> {
     let Some(managed) = &binding.managed else {
@@ -80,7 +81,10 @@ pub(super) fn admit_scope(journal: &Journal, context: &Context) -> Result<()> {
             .any(|r| r.vm.vm_id == context.vm_id()),
         "imported records are immutable"
     );
-    if matches!(context.kind.as_str(), "ensure_user" | "update_user_policy") {
+    if matches!(
+        context.kind,
+        JobKind::EnsureUser | JobKind::UpdateUserPolicy
+    ) {
         let target = context
             .policy_change
             .as_ref()
@@ -104,7 +108,7 @@ pub(super) fn admit_scope(journal: &Journal, context: &Context) -> Result<()> {
             "managed account admission ceiling exhausted"
         );
     }
-    if context.kind == "create_guest" {
+    if context.kind == JobKind::CreateGuest {
         let vm = context.vm()?;
         let active = journal
             .machines
@@ -182,7 +186,7 @@ mod tests {
     fn context() -> Context {
         let c = config();
         let policy = c.binding.admin_policy.clone();
-        Context {environment:c.environment,operation_id:"managed-create".into(),kind:"create_guest".into(),owner:c.binding.admin_user.clone(),budget_mib:policy.budget_mib,vm:Some(serde_json::from_value(json!({"vm_id":9201,"owner":c.binding.admin_user,"name":"managed-ubuntu","disk_mib":4096,"memory_mib":1024,"min_memory_mib":512,"cores":2,"state":"creating","guest":{"image_sha256":crate::control::managed::UBUNTU_2404_SHA256,"ssh_public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGT3dRd3uA9zT/qLn2AsdPk+8AtrOaE1abxprqSEusfe"}})).unwrap()),boot_id:"boot-one".into(),policy_revision:0,owner_policy:policy,policy_change:None,scope:Some(Namespace::from(&c.binding.scope)),managed:Some(c.binding),disk_shrink:None,extension:None}
+        Context {environment:c.environment,operation_id:"managed-create".into(),kind:JobKind::CreateGuest,owner:c.binding.admin_user.clone(),budget_mib:policy.budget_mib,vm:Some(serde_json::from_value(json!({"vm_id":9201,"owner":c.binding.admin_user,"name":"managed-ubuntu","disk_mib":4096,"memory_mib":1024,"min_memory_mib":512,"cores":2,"state":"creating","guest":{"image_sha256":crate::control::managed::UBUNTU_2404_SHA256,"ssh_public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGT3dRd3uA9zT/qLn2AsdPk+8AtrOaE1abxprqSEusfe"}})).unwrap()),boot_id:"boot-one".into(),policy_revision:0,owner_policy:policy,policy_change:None,scope:Some(Namespace::from(&c.binding.scope)),managed:Some(c.binding),disk_shrink:None,extension:None}
     }
     fn journal() -> Journal {
         let b = binding();
@@ -255,7 +259,7 @@ mod tests {
         };
         let job = Job {
             operation_id: c.operation_id.clone(),
-            kind: c.kind.clone(),
+            kind: c.kind,
             owner,
             vm: c.vm.clone(),
             policy_change: None,
@@ -299,7 +303,7 @@ mod tests {
         };
         let job = Job {
             operation_id: "wire-test".into(),
-            kind: "ensure_user".into(),
+            kind: JobKind::EnsureUser,
             owner,
             vm: None,
             policy_change: None,
@@ -422,7 +426,7 @@ mod tests {
     {
         let mut j = journal();
         let mut c = context();
-        c.kind = "ensure_user".into();
+        c.kind = JobKind::EnsureUser;
         c.vm = None;
         admit_scope(&j, &c).unwrap();
         c.owner_policy = ResourcePolicy {

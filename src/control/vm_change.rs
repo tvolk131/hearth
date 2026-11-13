@@ -1,6 +1,7 @@
 //! Immutable payloads for reviewed VM changes. Root-side observations remain
 //! authoritative; client plans cannot turn observed resources into ownership.
 use super::protocol::{Operation, Vm};
+use crate::control::JobKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -152,7 +153,7 @@ pub fn validate_catalog(c: &super::store::Catalog) -> anyhow::Result<()> {
             match extension {
                 JobExtension::Grow(spec) => {
                     ensure!(
-                        r.job.kind == "grow_vm" && spec.valid(),
+                        r.job.kind == JobKind::GrowVm && spec.valid(),
                         "invalid growth operation"
                     );
                     if !r.public.status.is_terminal() {
@@ -169,7 +170,7 @@ pub fn validate_catalog(c: &super::store::Catalog) -> anyhow::Result<()> {
                 }
                 JobExtension::Enroll(spec) => {
                     ensure!(
-                        r.job.kind == "enroll_vm"
+                        r.job.kind == JobKind::EnrollVm
                             && spec.plan.eligible
                             && r.public.vm_id == Some(spec.plan.vm.vm_id)
                             && r.public.owner == spec.plan.vm.owner
@@ -180,7 +181,7 @@ pub fn validate_catalog(c: &super::store::Catalog) -> anyhow::Result<()> {
                 JobExtension::IncomingMigration(plan) => {
                     plan.validate()?;
                     ensure!(
-                        r.job.kind == "create"
+                        r.job.kind == JobKind::Create
                             && plan.destination.environment == c.binding.environment
                             && r.job.operation_id
                                 == super::migration_transport::target_create_id(&plan.migration_id)
@@ -204,7 +205,7 @@ pub fn validate_catalog(c: &super::store::Catalog) -> anyhow::Result<()> {
                         .get(&spec.operation_id)
                         .context("recovery target missing")?;
                     ensure!(
-                        r.job.kind == "recover_operation"
+                        r.job.kind == JobKind::RecoverOperation
                             && r.public.operation_id != spec.operation_id
                             && original.public.owner == r.public.owner
                             && original.public.vm_id == r.public.vm_id,
@@ -213,7 +214,7 @@ pub fn validate_catalog(c: &super::store::Catalog) -> anyhow::Result<()> {
                     if spec.kind == RecoveryKind::AcknowledgeFailedStart {
                         ensure!(
                             c.binding.managed.is_some()
-                                && original.public.kind == "start"
+                                && original.public.kind == JobKind::Start
                                 && original.job.owner == r.job.owner
                                 && original.job.vm == r.job.vm,
                             "failed-start recovery differs from the exact managed operation"
@@ -223,7 +224,7 @@ pub fn validate_catalog(c: &super::store::Catalog) -> anyhow::Result<()> {
             }
         }
         if c.binding.managed.is_some()
-            && r.public.kind == "start"
+            && r.public.kind == JobKind::Start
             && r.public.status == OperationStatus::Cancelled
         {
             ensure!(c.operations.values().any(|recovery| recovery.public.status == OperationStatus::Verified
@@ -234,7 +235,7 @@ pub fn validate_catalog(c: &super::store::Catalog) -> anyhow::Result<()> {
     }
     for (id, spec) in &c.enrollments {
         ensure!(c.vms.get(id).is_some_and(|vm|vm.owner==spec.plan.vm.owner)
-            && c.operations.values().any(|r|r.public.kind=="enroll_vm" && r.public.vm_id==Some(*id) && r.public.status==OperationStatus::Verified
+            && c.operations.values().any(|r|r.public.kind==JobKind::EnrollVm && r.public.vm_id==Some(*id) && r.public.status==OperationStatus::Verified
                 && matches!(r.job.extension.as_deref(),Some(JobExtension::Enroll(s)) if s.plan.plan_id==spec.plan.plan_id)),"enrollment ownership proof missing");
     }
     if !c.migrations.is_empty() {
@@ -252,11 +253,11 @@ pub fn validate_journal(j: &super::host::Journal) -> anyhow::Result<()> {
             ensure!(j.schema >= 6, "extended helper operation requires schema6");
             match extension {
                 JobExtension::Grow(spec) => ensure!(
-                    r.job.kind == "grow_vm" && spec.valid(),
+                    r.job.kind == JobKind::GrowVm && spec.valid(),
                     "invalid helper growth payload"
                 ),
                 JobExtension::Enroll(spec) => ensure!(
-                    r.job.kind == "enroll_vm"
+                    r.job.kind == JobKind::EnrollVm
                         && r.job
                             .vm
                             .as_ref()
@@ -267,7 +268,7 @@ pub fn validate_journal(j: &super::host::Journal) -> anyhow::Result<()> {
                 JobExtension::IncomingMigration(plan) => {
                     plan.validate()?;
                     ensure!(
-                        r.job.kind == "create"
+                        r.job.kind == JobKind::Create
                             && plan.destination.environment == j.binding.environment
                             && r.job.operation_id
                                 == super::migration_transport::target_create_id(&plan.migration_id)
@@ -286,7 +287,7 @@ pub fn validate_journal(j: &super::host::Journal) -> anyhow::Result<()> {
                         .get(&spec.operation_id)
                         .context("helper recovery target missing")?;
                     ensure!(
-                        r.job.kind == "recover_operation"
+                        r.job.kind == JobKind::RecoverOperation
                             && r.job.operation_id != spec.operation_id
                             && original.job.owner == r.job.owner,
                         "invalid helper recovery binding"
@@ -294,20 +295,22 @@ pub fn validate_journal(j: &super::host::Journal) -> anyhow::Result<()> {
                     if spec.kind == RecoveryKind::AcknowledgeFailedStart {
                         ensure!(
                             j.binding.managed.is_some()
-                                && original.job.kind == "start"
+                                && original.job.kind == JobKind::Start
                                 && original.job.vm == r.job.vm,
                             "helper failed-start recovery differs from the exact managed operation"
                         );
                     }
                 }
             }
-            if r.job.kind == "grow_vm" && r.status == super::protocol::OperationStatus::Cancelled {
+            if r.job.kind == JobKind::GrowVm
+                && r.status == super::protocol::OperationStatus::Cancelled
+            {
                 ensure!(j.jobs.values().any(|p|p.steps.iter().any(|s|s.step==Step::Recover && s.phase==Phase::Verified)
                     && matches!(p.job.extension.as_deref(),Some(JobExtension::Recover(s)) if s.operation_id==r.job.operation_id && s.kind==RecoveryKind::AbortPreparation)),"growth cancellation lacks verified abort receipt");
             }
         }
         if j.binding.managed.is_some()
-            && r.job.kind == "start"
+            && r.job.kind == JobKind::Start
             && r.status == super::protocol::OperationStatus::Cancelled
         {
             ensure!(j.jobs.values().any(|recovery| recovery.steps.iter().any(|step| step.step == Step::Recover && step.phase == Phase::Verified)

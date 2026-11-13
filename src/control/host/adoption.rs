@@ -1,6 +1,7 @@
 //! Existing resources use the same durable lifecycle plans, with independently
 //! pinned allocation/configuration identities instead of creation markers.
 use super::*;
+use crate::control::JobKind;
 use crate::control::adoption::{DATASET_PROPERTIES, VOLUME_PROPERTIES};
 
 impl Host {
@@ -32,7 +33,7 @@ impl Host {
             let context = Context {
                 environment: self.binding.environment.clone(),
                 operation_id: "inventory".into(),
-                kind: "inspect".into(),
+                kind: JobKind::Inspect,
                 owner: owner.user_id.clone(),
                 budget_mib: owner.budget_mib,
                 vm: Some(adopted.vm.clone()),
@@ -185,7 +186,7 @@ mod tests {
         protocol::{User, VmState},
     };
 
-    async fn fixture(kind: &str) -> (tempfile::TempDir, Host, Context, SimulatedWorld) {
+    async fn fixture(kind: JobKind) -> (tempfile::TempDir, Host, Context, SimulatedWorld) {
         let temp = tempfile::tempdir().unwrap();
         let config: ManagedConfig = serde_json::from_str(include_str!(
             "../../../tests/fixtures/managed-adoption-config.json"
@@ -265,8 +266,8 @@ mod tests {
         vm.state = VmState::Stopped;
         let context = Context {
             environment: config.environment.clone(),
-            operation_id: kind.into(),
-            kind: kind.into(),
+            operation_id: kind.as_str().into(),
+            kind,
             owner: user.user_id.clone(),
             budget_mib: user.budget_mib,
             vm: Some(vm.clone()),
@@ -280,8 +281,8 @@ mod tests {
             extension: None,
         };
         let job = Job {
-            operation_id: kind.into(),
-            kind: kind.into(),
+            operation_id: kind.as_str().into(),
+            kind,
             owner: user,
             vm: Some(vm),
             policy_change: None,
@@ -293,7 +294,7 @@ mod tests {
                 .machines
                 .insert(101, adopted.machine_record(&context.environment));
             journal.jobs.insert(
-                kind.into(),
+                kind.as_str().into(),
                 HostJob {
                     sequence: 1,
                     fingerprint: fingerprint(&job)?,
@@ -329,9 +330,14 @@ mod tests {
 
     #[tokio::test]
     async fn adopted_lifecycle_uses_original_disks_without_configuration_rewrites() {
-        for kind in ["start", "stop", "shutdown", "delete"] {
+        for kind in [
+            JobKind::Start,
+            JobKind::Stop,
+            JobKind::Shutdown,
+            JobKind::Delete,
+        ] {
             let (_temp, host, context, world) = fixture(kind).await;
-            if matches!(kind, "stop" | "shutdown") {
+            if matches!(kind, JobKind::Stop | JobKind::Shutdown) {
                 world
                     .edit(|w| {
                         w.vms.get_mut(&101).unwrap().running = true;
@@ -349,7 +355,7 @@ mod tests {
                 original.datasets[&context.dataset()]
             );
             assert_eq!(after.storages, original.storages);
-            if kind == "delete" {
+            if kind == JobKind::Delete {
                 assert!(!after.vms.contains_key(&101));
                 assert!(!after.datasets.contains_key(&context.root_volume()));
                 assert_eq!(
@@ -359,7 +365,7 @@ mod tests {
             } else {
                 assert_eq!(after.vms[&101].config, original.vms[&101].config);
                 assert_eq!(after.datasets, original.datasets);
-                assert_eq!(after.vms[&101].running, kind == "start");
+                assert_eq!(after.vms[&101].running, kind == JobKind::Start);
             }
         }
     }
@@ -367,7 +373,7 @@ mod tests {
     #[tokio::test]
     async fn adopted_drift_blocks_before_recording_any_effect_intent() {
         for change in 0..4 {
-            let (_temp, host, context, world) = fixture("start").await;
+            let (_temp, host, context, world) = fixture(JobKind::Start).await;
             world
                 .edit(|w| {
                     match change {
@@ -412,7 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn adopted_lost_receipt_accepts_only_a_verified_postcondition() {
-        let (_temp, host, context, world) = fixture("start").await;
+        let (_temp, host, context, world) = fixture(JobKind::Start).await;
         world
             .edit(|w| {
                 w.faults.push(Fault {
@@ -434,7 +440,7 @@ mod tests {
 
     #[tokio::test]
     async fn adopted_retained_snapshots_refuse_delete_before_stopping_the_guest() {
-        let (_temp, host, context, world) = fixture("delete").await;
+        let (_temp, host, context, world) = fixture(JobKind::Delete).await;
         world
             .edit(|w| {
                 w.vms.get_mut(&101).unwrap().running = true;
@@ -455,7 +461,7 @@ mod tests {
 
     #[tokio::test]
     async fn adopted_missing_effect_receipt_does_not_reexecute_during_the_same_boot() {
-        let (_temp, host, context, world) = fixture("start").await;
+        let (_temp, host, context, world) = fixture(JobKind::Start).await;
         world
             .edit(|w| {
                 w.faults.push(Fault {

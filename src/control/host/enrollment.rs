@@ -2,6 +2,7 @@
 //! An observation is never ownership: the reviewed plan pins all resources,
 //! then an intent precedes the small metadata changes and proof publication.
 use super::*;
+use crate::control::JobKind;
 use crate::control::vm_change::{EnrollmentPlan, JobExtension};
 
 const ENROLL_KEYS: &[&str] = &[
@@ -50,7 +51,7 @@ impl Host {
         let context = Context {
             environment: self.binding.environment.clone(),
             operation_id: "enrollment-plan".into(),
-            kind: "enroll_vm".into(),
+            kind: JobKind::EnrollVm,
             owner: owner_id.into(),
             budget_mib: owner.budget_mib,
             vm: Some(Vm {

@@ -409,12 +409,20 @@ fn catalog_and_helper_image_allowlist_refuse_unapproved_or_unbootable_profiles()
         "enroll_vm",
         "recover_operation",
         "migration",
-        "exec",
-        "reboot_host",
     ] {
         let mut bad = job.clone();
-        bad.kind = kind.into();
+        bad.kind = kind.parse().unwrap();
         assert!(h.validate_job(&bad).is_err());
+    }
+    // Kinds outside the closed set cannot be represented at all: a job naming
+    // one is refused while decoding, before validation or the journal.
+    for kind in ["exec", "reboot_host"] {
+        let mut wire = serde_json::to_value(job).unwrap();
+        wire["kind"] = kind.into();
+        assert!(
+            serde_json::from_value::<pve_dev::control::store::Job>(wire).is_err(),
+            "{kind}"
+        );
     }
 }
 

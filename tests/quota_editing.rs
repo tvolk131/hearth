@@ -355,23 +355,28 @@ async fn pending_increases_hold_capacity_and_competing_acceptance_is_serialized(
 }
 
 #[test]
-fn legacy_job_serialization_and_plan_fingerprint_remain_exact() {
+fn legacy_job_serialization_and_canonical_fingerprint_are_pinned() {
     let value = json!({"operation_id":"legacy","kind":"ensure_user","owner":{"user_id":"alice","role":"member","budget_mib":128,"min_memory_budget_mib":256,"max_memory_budget_mib":1024,"max_cores":4,"max_vms":4,"ready":false},"vm":null});
     let job: pve_dev::control::store::Job = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(&job).unwrap(), value);
     let expected = r#"{"operation_id":"legacy","kind":"ensure_user","owner":{"user_id":"alice","role":"member","budget_mib":128,"min_memory_budget_mib":256,"max_memory_budget_mib":1024,"max_cores":4,"max_vms":4,"ready":false},"vm":null}"#;
     assert_eq!(serde_json::to_vec(&job).unwrap(), expected.as_bytes());
+    // Fingerprints hash the canonical (key-sorted) form behind a version tag.
+    let canonical = r#"{"kind":"ensure_user","operation_id":"legacy","owner":{"budget_mib":128,"max_cores":4,"max_memory_budget_mib":1024,"max_vms":4,"min_memory_budget_mib":256,"ready":false,"role":"member","user_id":"alice"},"vm":null}"#;
     use sha2::Digest;
     assert_eq!(
         pve_dev::control::host::fingerprint(&job).unwrap(),
-        format!("{:x}", sha2::Sha256::digest(expected.as_bytes()))
+        format!(
+            "{:x}",
+            sha2::Sha256::digest([b"hearth-job-v1\n".as_slice(), canonical.as_bytes()].concat())
+        )
     );
     let bytes = serde_json::to_vec(&job).unwrap();
     let legacy = String::from_utf8(bytes).unwrap();
     assert!(!legacy.contains("policy_change"));
     assert!(!legacy.contains("policy_revision"));
     assert_eq!(
-        pve_dev::control::host::plan("ensure_user").unwrap(),
+        pve_dev::control::host::plan(pve_dev::control::JobKind::EnsureUser).unwrap(),
         &[Step::Control, Step::Dataset, Step::Storage]
     );
 }
@@ -615,7 +620,7 @@ async fn legacy_pending_helper_plan_and_original_owner_policy_survive_upgrade() 
     assert_eq!(record.fingerprint, fingerprint);
     assert_eq!(
         record.steps.iter().map(|r| r.step).collect::<Vec<_>>(),
-        pve_dev::control::host::plan("create").unwrap()
+        pve_dev::control::host::plan(pve_dev::control::JobKind::Create).unwrap()
     );
     assert!(history.owners["erin"].policy.is_none());
     lab.accepted(lab.update("first-after-upgrade", 256));

@@ -1,6 +1,7 @@
 pub mod adoption;
 pub mod guest;
 pub mod host;
+pub mod job_kind;
 pub mod maintenance;
 pub mod managed;
 pub mod migration;
@@ -12,3 +13,5 @@ pub mod shrink;
 pub mod store;
 pub mod transport;
 pub mod vm_change;
+
+pub use job_kind::JobKind;

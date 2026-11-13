@@ -6,6 +6,7 @@ use super::{
     protocol::{Vm, VmState},
     store::Job,
 };
+use crate::control::JobKind;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -326,12 +327,15 @@ impl AdoptedVm {
             .ok_or_else(|| anyhow::anyhow!("adopted job has no VM"))?;
         let mut expected = self.vm.clone();
         expected.state = vm.state.clone();
-        let recovery = job.kind == "recover_operation"
+        let recovery = job.kind == JobKind::RecoverOperation
             && matches!(job.extension.as_deref(), Some(super::vm_change::JobExtension::Recover(spec))
                 if spec.kind == super::vm_change::RecoveryKind::AcknowledgeFailedStart
                     && host::valid_operation_id(&spec.operation_id) && host::valid_operation_id(&spec.inspection_id));
         ensure!(
-            (matches!(job.kind.as_str(), "start" | "shutdown" | "stop" | "delete") || recovery)
+            (matches!(
+                job.kind,
+                JobKind::Start | JobKind::Shutdown | JobKind::Stop | JobKind::Delete
+            ) || recovery)
                 && *vm == expected
                 && job.owner.user_id == binding.admin_user
                 && job.owner.role == super::protocol::Role::Admin

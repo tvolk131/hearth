@@ -1,6 +1,7 @@
 //! Explicit cold repair of one identified schema-marker downgrade. This path
 //! never opens workers, probes guests, initializes state, or discards a record.
 use super::*;
+use crate::control::JobKind;
 use redb::{
     ReadableTableMetadata, StorageBackend, TableHandle,
     backends::{FileBackend, InMemoryBackend},
@@ -366,7 +367,7 @@ fn promote(record: &[u8], config: &ManagedConfig) -> Result<(Vec<u8>, Journal, V
             };
             ensure!(
                 spec.kind == crate::control::vm_change::RecoveryKind::AcknowledgeFailedStart
-                    && job.job.kind == "recover_operation"
+                    && job.job.kind == JobKind::RecoverOperation
                     && job.status == OperationStatus::Queued
                     && job.step == "queued"
                     && job.attempts == 0
@@ -413,12 +414,12 @@ fn promote(record: &[u8], config: &ManagedConfig) -> Result<(Vec<u8>, Journal, V
         } else {
             ensure!(
                 job.status.is_terminal()
-                    || job.status == OperationStatus::Blocked && job.job.kind == "start",
+                    || job.status == OperationStatus::Blocked && job.job.kind == JobKind::Start,
                 "running or unrelated pending helper work forbids marker repair"
             );
             if job.status == OperationStatus::Verified {
                 ensure!(
-                    plan(&job.job.kind).is_some_and(|steps| steps.len() == job.steps.len()
+                    plan(job.job.kind).is_some_and(|steps| steps.len() == job.steps.len()
                         && steps
                             .iter()
                             .zip(&job.steps)
@@ -474,7 +475,7 @@ mod tests {
         }
     }
     fn record(job: Job, sequence: u64, status: OperationStatus) -> HostJob {
-        let steps = plan(&job.kind)
+        let steps = plan(job.kind)
             .unwrap()
             .iter()
             .map(|s| step(*s, Phase::Verified))
@@ -532,7 +533,7 @@ mod tests {
             assert_eq!(vm.state, VmState::Stopped);
             let job = |id: &str, kind: &str, vm: Option<Vm>| Job {
                 operation_id: id.into(),
-                kind: kind.into(),
+                kind: kind.parse().unwrap(),
                 owner: owner.clone(),
                 vm,
                 disk_shrink: None,

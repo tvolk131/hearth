@@ -1,4 +1,5 @@
 //! Independent regression checks for cross-policy accounting and stale helpers.
+use pve_dev::control::JobKind;
 use std::path::PathBuf;
 
 use iroh::SecretKey;
@@ -276,7 +277,7 @@ async fn nonstorage_policy_update_rejects_new_stale_jobs_but_keeps_historical_re
 
     let stale = Job {
         operation_id: "late-stale-start".into(),
-        kind: "start".into(),
+        kind: JobKind::Start,
         owner: old_user,
         vm: Some(vm),
         disk_shrink: None,
@@ -313,7 +314,7 @@ async fn helper_rejects_forged_previous_nonstorage_policy_at_the_same_revision()
         operation_id: "forged-old-policy".into(),
         disk_shrink: None,
         extension: None,
-        kind: "update_user_policy".into(),
+        kind: JobKind::UpdateUserPolicy,
         owner: forged.clone(),
         vm: None,
         policy_change: Some(Box::new(PolicyChange {

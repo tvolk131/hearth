@@ -1,3 +1,4 @@
+use crate::control::JobKind;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -278,33 +279,33 @@ impl Step {
     }
 }
 
-pub fn plan(kind: &str) -> Option<&'static [Step]> {
+pub fn plan(kind: JobKind) -> Option<&'static [Step]> {
     match kind {
-        "recover_operation" => Some(&[Step::Recover]),
-        "enroll_vm" => Some(&[Step::Enroll, Step::Verify]),
-        "grow_vm" => Some(&[
+        JobKind::RecoverOperation => Some(&[Step::Recover]),
+        JobKind::EnrollVm => Some(&[Step::Enroll, Step::Verify]),
+        JobKind::GrowVm => Some(&[
             Step::GrowPrepare,
             Step::GrowVolume,
             Step::GrowPartition,
             Step::GrowFilesystem,
             Step::GrowUnlock,
         ]),
-        "shrink_vm" => Some(&[Step::ShrinkStage, Step::ShrinkSwap, Step::ShrinkUnlock]),
-        "finish_vm_shrink" => Some(&[Step::ShrinkFinish]),
-        "ensure_user" => Some(&[Step::Control, Step::Dataset, Step::Storage]),
-        "delete_user" => Some(&[
+        JobKind::ShrinkVm => Some(&[Step::ShrinkStage, Step::ShrinkSwap, Step::ShrinkUnlock]),
+        JobKind::FinishVmShrink => Some(&[Step::ShrinkFinish]),
+        JobKind::EnsureUser => Some(&[Step::Control, Step::Dataset, Step::Storage]),
+        JobKind::DeleteUser => Some(&[
             Step::OwnerPreflight,
             Step::OwnerStorage,
             Step::OwnerDataset,
             Step::OwnerRelease,
         ]),
-        "update_user_policy" => Some(&[
+        JobKind::UpdateUserPolicy => Some(&[
             Step::PolicyPreflight,
             Step::PolicyFirst,
             Step::PolicySecond,
             Step::PolicyCommit,
         ]),
-        "create" => Some(&[
+        JobKind::Create => Some(&[
             Step::Preflight,
             Step::Vm,
             Step::Volume,
@@ -312,7 +313,7 @@ pub fn plan(kind: &str) -> Option<&'static [Step]> {
             Step::CloudInit,
             Step::Verify,
         ]),
-        "create_guest" => Some(&[
+        JobKind::CreateGuest => Some(&[
             Step::Preflight,
             Step::Vm,
             Step::Volume,
@@ -321,17 +322,17 @@ pub fn plan(kind: &str) -> Option<&'static [Step]> {
             Step::CloudInit,
             Step::Verify,
         ]),
-        "start" => Some(&[Step::Verify, Step::Start]),
-        "shutdown" => Some(&[Step::Verify, Step::Shutdown]),
-        "stop" => Some(&[Step::Verify, Step::Stop]),
-        "delete" => Some(&[
+        JobKind::Start => Some(&[Step::Verify, Step::Start]),
+        JobKind::Shutdown => Some(&[Step::Verify, Step::Shutdown]),
+        JobKind::Stop => Some(&[Step::Verify, Step::Stop]),
+        JobKind::Delete => Some(&[
             Step::Verify,
             Step::Stop,
             Step::Unprotect,
             Step::Destroy,
             Step::Release,
         ]),
-        _ => None,
+        JobKind::Migration | JobKind::Inspect => None,
     }
 }
 
@@ -417,7 +418,7 @@ impl HostBinding {
                 .is_some_and(|v| m.adopted(v.vm_id).is_some())
         }) {
             self.validate_job(job)?;
-            return plan(&job.kind).context("unsupported adopted operation");
+            return plan(job.kind).context("unsupported adopted operation");
         }
         validate_with_limits(
             job,
@@ -444,7 +445,7 @@ impl HostBinding {
         ensure!(
             self.physical_trial
                 .as_ref()
-                .is_none_or(|b| job.kind != "shutdown"
+                .is_none_or(|b| job.kind != JobKind::Shutdown
                     || b.scope.features.contains("resize")
                     || b.scope.features.contains("migration")),
             "graceful shutdown is currently lab-qualified only"
@@ -877,8 +878,21 @@ fn disk_maintenance_timeout(disk_mib: u64) -> Duration {
     )
 }
 
+/// Domain tag for [`fingerprint`]. Bump the version when the meaning of a job
+/// changes, so a stored fingerprint can never match a differently-read job.
+const JOB_FINGERPRINT_DOMAIN: &[u8] = b"hearth-job-v1\n";
+
+/// Identity of a job for request de-duplication and journal integrity.
+///
+/// Hashes canonical JSON (object keys sorted, via `serde_json::Value`'s
+/// ordered map) behind a versioned domain tag, so the result does not depend
+/// on struct field order.
 pub fn fingerprint(job: &Job) -> Result<String> {
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(job)?)))
+    let canonical = serde_json::to_vec(&serde_json::to_value(job)?)?;
+    let mut digest = Sha256::new();
+    digest.update(JOB_FINGERPRINT_DOMAIN);
+    digest.update(&canonical);
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn profile(vm: &Vm) -> Profile {
@@ -907,7 +921,7 @@ fn validate_with_limits(
         Some(super::vm_change::JobExtension::IncomingMigration(_))
     );
     let expanded = expanded || incoming;
-    let steps = plan(&job.kind)
+    let steps = plan(job.kind)
         .ok_or_else(|| anyhow!("unsupported helper operation kind {:?}", job.kind))?;
     let owner = &job.owner;
     if let Some(super::vm_change::JobExtension::IncomingMigration(plan)) = job.extension.as_deref()
@@ -916,7 +930,7 @@ fn validate_with_limits(
         let mut expected = plan.vm(super::migration::Role::Destination);
         expected.guest = None;
         ensure!(
-            job.kind == "create"
+            job.kind == JobKind::Create
                 && job.operation_id
                     == super::migration_transport::target_create_id(&plan.migration_id)
                 && job
@@ -929,7 +943,7 @@ fn validate_with_limits(
                 && job.policy_change.is_none(),
             "incoming staging differs from authorized destination plan"
         );
-    } else if job.kind == "recover_operation" {
+    } else if job.kind == JobKind::RecoverOperation {
         let Some(super::vm_change::JobExtension::Recover(spec)) = job.extension.as_deref() else {
             bail!("recovery specification missing")
         };
@@ -941,7 +955,7 @@ fn validate_with_limits(
                 && job.disk_shrink.is_none(),
             "invalid recovery payload"
         );
-    } else if job.kind == "grow_vm" {
+    } else if job.kind == JobKind::GrowVm {
         let Some(super::vm_change::JobExtension::Grow(spec)) = job.extension.as_deref() else {
             bail!("growth specification missing")
         };
@@ -956,7 +970,7 @@ fn validate_with_limits(
                 && job.disk_shrink.is_none(),
             "growth requires an exact stopped source profile and admitted target"
         );
-    } else if job.kind == "enroll_vm" {
+    } else if job.kind == JobKind::EnrollVm {
         let Some(super::vm_change::JobExtension::Enroll(spec)) = job.extension.as_deref() else {
             bail!("enrollment specification missing")
         };
@@ -974,7 +988,7 @@ fn validate_with_limits(
     } else {
         ensure!(job.extension.is_none(), "unexpected extended job payload");
     }
-    if matches!(job.kind.as_str(), "shrink_vm" | "finish_vm_shrink") {
+    if matches!(job.kind, JobKind::ShrinkVm | JobKind::FinishVmShrink) {
         let spec = job
             .disk_shrink
             .as_ref()
@@ -984,7 +998,7 @@ fn validate_with_limits(
             spec.valid() && job.policy_change.is_none() && owner.ready,
             "unsupported shrink profile"
         );
-        if job.kind == "shrink_vm" {
+        if job.kind == JobKind::ShrinkVm {
             ensure!(
                 spec.preparation_id.is_none()
                     && vm.disk_mib == spec.previous_disk_mib
@@ -1012,7 +1026,7 @@ fn validate_with_limits(
         (64..=limits.budget_mib).contains(&owner.budget_mib),
         "owner disk budget must be 64..8192 MiB"
     );
-    if job.kind == "delete_user" {
+    if job.kind == JobKind::DeleteUser {
         ensure!(
             job.vm.is_none()
                 && job.policy_change.is_none()
@@ -1027,7 +1041,7 @@ fn validate_with_limits(
         owner.state == AccountState::Active,
         "operation owner is inactive"
     );
-    if job.kind == "update_user_policy" {
+    if job.kind == JobKind::UpdateUserPolicy {
         let change = job
             .policy_change
             .as_ref()
@@ -1059,7 +1073,7 @@ fn validate_with_limits(
         job.policy_change.is_none(),
         "unexpected policy payload on VM/ensure operation"
     );
-    if job.kind == "ensure_user" {
+    if job.kind == JobKind::EnsureUser {
         ensure!(job.vm.is_none(), "ensure_user carries no VM");
         return Ok(steps);
     }
@@ -1068,11 +1082,11 @@ fn validate_with_limits(
         .as_ref()
         .ok_or_else(|| anyhow!("VM operation requires a VM profile"))?;
     ensure!(
-        job.kind != "create_guest" || vm.guest.is_some(),
+        job.kind != JobKind::CreateGuest || vm.guest.is_some(),
         "create_guest requires an immutable guest specification"
     );
     ensure!(
-        job.kind != "create" || vm.guest.is_none(),
+        job.kind != JobKind::Create || vm.guest.is_none(),
         "blank create cannot carry a guest specification"
     );
     if let Some(guest) = &vm.guest {
@@ -1244,7 +1258,7 @@ fn safe_value(value: &str) -> bool {
 struct Context {
     environment: String,
     operation_id: String,
-    kind: String,
+    kind: JobKind,
     owner: String,
     budget_mib: u64,
     vm: Option<Vm>,
@@ -3190,7 +3204,7 @@ impl Host {
                         .get(&operation_id)
                         .context("operation not found")?;
                     ensure!(
-                        job.job.kind == "start",
+                        job.job.kind == JobKind::Start,
                         "managed inspection is limited to failed starts"
                     );
                     self.binding.validate_job(&job.job)?;
@@ -3413,10 +3427,10 @@ impl Host {
             if job.extension.is_some() {
                 journal.schema = journal.schema.max(6);
             }
-            if job.disk_shrink.is_some() || job.kind == "shutdown" {
+            if job.disk_shrink.is_some() || job.kind == JobKind::Shutdown {
                 journal.schema = journal.schema.max(5);
             }
-            if record.status == OperationStatus::Queued && job.kind == "shrink_vm" {
+            if record.status == OperationStatus::Queued && job.kind == JobKind::ShrinkVm {
                 let vm = job.vm.as_ref().context("shrink VM missing")?;
                 ensure!(
                     !journal.disk_shrinks.contains_key(&vm.vm_id),
@@ -3436,10 +3450,10 @@ impl Host {
                     },
                 );
             }
-            if job.kind == "update_user_policy" {
+            if job.kind == JobKind::UpdateUserPolicy {
                 journal.schema = journal.schema.max(2);
             }
-            if job.kind == "delete_user" {
+            if job.kind == JobKind::DeleteUser {
                 journal.schema = journal.schema.max(3);
             }
             journal.jobs.insert(job.operation_id.clone(), record);
@@ -3529,7 +3543,7 @@ impl Host {
         let context = Context {
             environment: self.binding.environment.clone(),
             operation_id: operation_id.into(),
-            kind: record.job.kind.clone(),
+            kind: record.job.kind,
             owner: record.job.owner.user_id.clone(),
             budget_mib: record.job.owner.budget_mib,
             vm: record.job.vm.clone(),
@@ -3565,22 +3579,33 @@ impl Host {
                 .with_context(|| format!("{} step {}", context.kind, step.name()))?;
         }
         self.change(|journal| {
-            match context.kind.as_str() {
-                "ensure_user" => {
+            match context.kind {
+                JobKind::EnsureUser => {
                     journal
                         .owners
                         .get_mut(&context.owner)
                         .expect("admitted owner")
                         .ready = true
                 }
-                "create" | "create_guest" | "enroll_vm" => {
+                JobKind::Create | JobKind::CreateGuest | JobKind::EnrollVm => {
                     journal
                         .machines
                         .get_mut(&context.vm_id())
                         .expect("preflighted machine")
                         .state = MachineState::Present
                 }
-                _ => {}
+                JobKind::Start
+                | JobKind::Shutdown
+                | JobKind::Stop
+                | JobKind::Delete
+                | JobKind::DeleteUser
+                | JobKind::UpdateUserPolicy
+                | JobKind::GrowVm
+                | JobKind::ShrinkVm
+                | JobKind::FinishVmShrink
+                | JobKind::RecoverOperation
+                | JobKind::Migration
+                | JobKind::Inspect => {}
             }
             let job = journal.jobs.get_mut(operation_id).expect("running job");
             job.status = OperationStatus::Verified;
@@ -3608,7 +3633,7 @@ impl Host {
             .get(&owner.operation_id)
             .ok_or_else(|| anyhow!("legacy initial owner policy proof missing"))?;
         ensure!(
-            initial.job.kind == "ensure_user"
+            initial.job.kind == JobKind::EnsureUser
                 && initial.job.owner.user_id == owner.user_id
                 && initial.job.owner.policy_revision == 0
                 && initial.job.owner.budget_mib == owner.budget_mib,
@@ -3624,15 +3649,15 @@ impl Host {
                 let owner=if r.role==super::migration::Role::Source {&r.plan.source_owner}else{&r.plan.target_owner};
                 !r.phase.terminal() && owner==&context.owner
             }), "owner has an active migration or retained recovery; use its explicit handoff/abort/finish workflow");
-            if context.kind=="recover_operation" {
+            if context.kind==JobKind::RecoverOperation {
                 let Some(super::vm_change::JobExtension::Recover(spec))=context.extension.as_deref() else {bail!("recovery specification missing")};
                 let original=journal.jobs.get(&spec.operation_id).context("original operation missing")?;
                 let proved=journal.jobs[&context.operation_id].steps.iter().any(|s|s.step==Step::Recover && s.phase==Phase::Verified);
                 ensure!((original.status==OperationStatus::Blocked || proved) && original.job.owner==journal.jobs[&context.operation_id].job.owner && original.job.vm.as_ref().map(|v|v.vm_id)==context.vm.as_ref().map(|v|v.vm_id),"recovery does not match the blocked operation or its verified decision");
                 return Ok(());
             }
-            if context.kind == "ensure_user" {
-                ensure!(!journal.jobs.values().any(|job| job.job.owner.user_id == context.owner && job.job.kind == "delete_user"
+            if context.kind == JobKind::EnsureUser {
+                ensure!(!journal.jobs.values().any(|job| job.job.owner.user_id == context.owner && job.job.kind == JobKind::DeleteUser
                     && !job.status.is_terminal()), "owner deletion is pending or blocked");
                 let owner = journal
                     .owners
@@ -3665,9 +3690,9 @@ impl Host {
                 .owners
                 .get(&context.owner)
                 .ok_or_else(|| anyhow!("owner storage has no helper history"))?;
-            if context.kind == "delete_user" {
+            if context.kind == JobKind::DeleteUser {
                 let initial = journal.jobs.get(&owner.operation_id).ok_or_else(|| anyhow!("initial account role proof missing"))?;
-                ensure!(initial.job.kind == "ensure_user" && initial.job.owner.user_id == context.owner
+                ensure!(initial.job.kind == JobKind::EnsureUser && initial.job.owner.user_id == context.owner
                     && initial.job.owner.role == Role::Member, "helper refuses deletion of an account originally provisioned as administrator");
                 ensure!(owner.policy_revision == context.policy_revision && owner.budget_mib == context.budget_mib
                     && Self::owner_policy(journal, owner)? == context.owner_policy, "delete_user current policy differs from frozen account");
@@ -3684,10 +3709,10 @@ impl Host {
             ensure!(!journal.jobs.values().any(|j| j.job.owner.user_id == context.owner && j.job.operation_id != context.operation_id
                 && j.job.extension.is_some() && !j.status.is_terminal()), "owner has an unsettled disk growth or enrollment");
 
-            if matches!(context.kind.as_str(), "shrink_vm" | "finish_vm_shrink") {
+            if matches!(context.kind, JobKind::ShrinkVm | JobKind::FinishVmShrink) {
                 ensure!(!journal.jobs.values().any(|j| j.job.owner.user_id == context.owner
                     && j.job.operation_id != context.operation_id && !j.status.is_terminal()), "shrink owner has unfinished helper work");
-                if context.kind == "finish_vm_shrink" {
+                if context.kind == JobKind::FinishVmShrink {
                     if let Some(hold) = journal.disk_shrinks.get(&context.vm_id()) {
                         let mut expected = hold.spec.clone(); expected.preparation_id = Some(hold.operation_id.clone());
                         ensure!(context.disk_shrink.as_deref() == Some(&expected), "finish specification differs from retained preparation");
@@ -3698,9 +3723,9 @@ impl Host {
                 }
             }
             if let Some(hold) = journal.disk_shrinks.values().find(|s| s.owner == context.owner) {
-                ensure!((context.kind == "shrink_vm" && hold.operation_id == context.operation_id)
-                    || (context.kind == "finish_vm_shrink" && hold.prepared && context.disk_shrink.as_ref().and_then(|s| s.preparation_id.as_ref()) == Some(&hold.operation_id))
-                    || (matches!(context.kind.as_str(), "start" | "stop" | "shutdown") && hold.prepared && hold.vm_id == context.vm_id()),
+                ensure!((context.kind == JobKind::ShrinkVm && hold.operation_id == context.operation_id)
+                    || (context.kind == JobKind::FinishVmShrink && hold.prepared && context.disk_shrink.as_ref().and_then(|s| s.preparation_id.as_ref()) == Some(&hold.operation_id))
+                    || (matches!(context.kind, JobKind::Start | JobKind::Stop | JobKind::Shutdown) && hold.prepared && hold.vm_id == context.vm_id()),
                     "owner retains disk shrink recovery; only target lifecycle and explicit finish are allowed");
             }
             ensure!(
@@ -3708,7 +3733,7 @@ impl Host {
                 "owner storage is not verified ready on the host"
             );
             ensure!(
-                context.kind == "update_user_policy" || owner.budget_mib == context.budget_mib,
+                context.kind == JobKind::UpdateUserPolicy || owner.budget_mib == context.budget_mib,
                 "owner budget differs from the provisioned dataset"
             );
             ensure!(
@@ -3717,11 +3742,11 @@ impl Host {
                     .values()
                     .any(|job| job.job.owner.user_id == context.owner
                         && job.job.operation_id != context.operation_id
-                        && matches!(job.job.kind.as_str(), "update_user_policy" | "delete_user")
+                        && matches!(job.job.kind, JobKind::UpdateUserPolicy | JobKind::DeleteUser)
                         && !job.status.is_terminal()),
                 "owner policy is pending or blocked"
             );
-            if context.kind == "update_user_policy" {
+            if context.kind == JobKind::UpdateUserPolicy {
                 let change = context
                     .policy_change
                     .as_ref()
@@ -3769,27 +3794,27 @@ impl Host {
             let vm = context.vm()?;
             match journal.machines.get(&vm.vm_id) {
                 None => ensure!(
-                    matches!(context.kind.as_str(), "create" | "create_guest" | "enroll_vm"),
+                    matches!(context.kind, JobKind::Create | JobKind::CreateGuest | JobKind::EnrollVm),
                     "VM {} has no helper creation history; refusing",
                     vm.vm_id
                 ),
                 Some(machine) => {
                     ensure!(
                         machine.owner == context.owner && (machine.profile == profile(vm)
-                            || (context.kind == "shrink_vm" && journal.jobs[&context.operation_id].steps.iter().any(|r| r.step == Step::ShrinkSwap && r.phase == Phase::Verified)
+                            || (context.kind == JobKind::ShrinkVm && journal.jobs[&context.operation_id].steps.iter().any(|r| r.step == Step::ShrinkSwap && r.phase == Phase::Verified)
                                 && context.disk_shrink.as_ref().is_some_and(|s| { let mut p = profile(vm); p.disk_mib = s.target_disk_mib; machine.profile == p }))
-                            || (context.kind == "grow_vm" && journal.jobs[&context.operation_id].steps.iter().any(|r| r.step == Step::GrowFilesystem && r.phase == Phase::Verified)
+                            || (context.kind == JobKind::GrowVm && journal.jobs[&context.operation_id].steps.iter().any(|r| r.step == Step::GrowFilesystem && r.phase == Phase::Verified)
                                 && matches!(context.extension.as_deref(), Some(super::vm_change::JobExtension::Grow(s)) if {let mut p=profile(vm);p.disk_mib=s.target_disk_mib;machine.profile==p}))),
                         "VM {} ownership or profile differs from helper history",
                         vm.vm_id
                     );
-                    let allowed = match context.kind.as_str() {
-                        "create" | "create_guest" | "enroll_vm" => {
+                    let allowed = match context.kind {
+                        JobKind::Create | JobKind::CreateGuest | JobKind::EnrollVm => {
                             machine.create_operation == context.operation_id
                                 && machine.state == MachineState::Creating
                         }
-                        "start" | "stop" | "shutdown" | "shrink_vm" | "finish_vm_shrink" | "grow_vm" => machine.state == MachineState::Present,
-                        "delete" => {
+                        JobKind::Start | JobKind::Stop | JobKind::Shutdown | JobKind::ShrinkVm | JobKind::FinishVmShrink | JobKind::GrowVm => machine.state == MachineState::Present,
+                        JobKind::Delete => {
                             machine.state == MachineState::Present
                                 || (matches!(
                                     machine.state,
@@ -3797,7 +3822,12 @@ impl Host {
                                 ) && machine.delete_operation.as_deref()
                                     == Some(&context.operation_id))
                         }
-                        _ => false,
+                        JobKind::EnsureUser
+                        | JobKind::DeleteUser
+                        | JobKind::UpdateUserPolicy
+                        | JobKind::RecoverOperation
+                        | JobKind::Migration
+                        | JobKind::Inspect => false,
                     };
                     ensure!(
                         allowed,
@@ -3878,7 +3908,7 @@ impl Host {
     ) -> Result<()> {
         self.update_step(context, step, |journal, record| {
             remember(journal, context, step, &identity)?;
-            if step == Step::Verify && context.kind == "delete" {
+            if step == Step::Verify && context.kind == JobKind::Delete {
                 let machine = journal
                     .machines
                     .get_mut(&context.vm_id())
@@ -4210,7 +4240,7 @@ impl Host {
                 "enrolled root attachment size differs from its admitted profile"
             );
             if config.get("lock").is_some_and(|v| !v.is_null()) {
-                let migration_owned = context.kind == "migration"
+                let migration_owned = context.kind == JobKind::Migration
                     && self
                         .journal()?
                         .migrations
@@ -4225,7 +4255,7 @@ impl Host {
                         });
                 ensure!(
                     text(&config["lock"]) == "migrate"
-                        && (matches!(context.kind.as_str(), "shrink_vm" | "grow_vm")
+                        && (matches!(context.kind, JobKind::ShrinkVm | JobKind::GrowVm)
                             || migration_owned),
                     "enrolled VM has an unowned lock"
                 );
@@ -4264,8 +4294,8 @@ impl Host {
                 !FORBIDDEN_KEYS.contains(&key.as_str())
                     || (key == "lock"
                         && config[key] == "migrate"
-                        && (matches!(context.kind.as_str(), "shrink_vm" | "grow_vm")
-                            || (context.kind == "migration"
+                        && (matches!(context.kind, JobKind::ShrinkVm | JobKind::GrowVm)
+                            || (context.kind == JobKind::Migration
                                 && self
                                     .journal()?
                                     .migrations
@@ -4814,7 +4844,7 @@ impl Host {
         if context.adopted().is_some() {
             return self.verify_adopted_allocation(context).await;
         }
-        if context.kind == "update_user_policy" {
+        if context.kind == JobKind::UpdateUserPolicy {
             return self.verify_policy_owner(context).await;
         }
         let journal = self.journal()?;
@@ -4851,7 +4881,7 @@ impl Host {
         if context.adopted().is_some() {
             self.verify_adopted_volumes(context).await?;
             self.managed_config(context, require_protection).await?;
-            if context.kind == "delete" {
+            if context.kind == JobKind::Delete {
                 self.verify_adopted_deletion(context).await?;
             }
             return Ok(());
@@ -5883,7 +5913,7 @@ mod physical_scope_tests {
         Context {
             environment: "0123456789abcdef0123456789abcdef".into(),
             operation_id: "test".into(),
-            kind: "create".into(),
+            kind: JobKind::Create,
             owner: "trial-user".into(),
             budget_mib: 128,
             vm: Some(

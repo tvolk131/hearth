@@ -1,3 +1,4 @@
+use pve_dev::control::JobKind;
 use pve_dev::control::{
     guest::{address, encode_key, image_metadata},
     protocol::Guest,
@@ -82,7 +83,7 @@ fn bootable_creation_durably_freezes_image_and_key_and_charges_the_whole_disk() 
             .unwrap()
     );
     let frozen = &store.read().unwrap().operations[accepted["operation_id"].as_str().unwrap()];
-    assert_eq!(frozen.job.kind, "create_guest");
+    assert_eq!(frozen.job.kind, JobKind::CreateGuest);
     assert_eq!(
         frozen
             .job
