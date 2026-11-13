@@ -2,7 +2,7 @@
 //! no filesystem conversion, rename or recovery deletion is blindly replayed.
 use super::*;
 
-const WORKER: &str = include_str!("../shrink_worker.py");
+pub(super) const WORKER: &str = include_str!("../shrink_worker.py");
 const SOURCE_KEYS: &[&str] = &[
     "type",
     "guid",
@@ -119,71 +119,19 @@ impl Host {
                         .is_none_or(|s| s.features.contains("resize")),
                     "physical scope does not authorize shrink"
                 );
-                // The Python adapter terminates and reaps its own subprocess
-                // groups on SIGTERM, including Linux parent-death notification.
-                // On timeout, give it that cleanup opportunity before SIGKILL.
-                let mut command = tokio::process::Command::new("python3");
-                command
-                    .args(["-I", "-c", WORKER, &serde_json::to_string(input)?])
-                    .gid(0)
-                    .env_clear()
-                    .env("PATH", SAFE_PATH)
-                    .env("LC_ALL", "C")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                let mut child = command.spawn()?;
-                let pid = child.id().context("shrink worker PID missing")?;
-                let mut stdout = child.stdout.take().context("worker stdout missing")?;
-                let mut stderr = child.stderr.take().context("worker stderr missing")?;
-                let output = tokio::spawn(async move {
-                    let mut data = Vec::new();
-                    stdout.read_to_end(&mut data).await.map(|_| data)
-                });
-                let errors = tokio::spawn(async move {
-                    let mut data = Vec::new();
-                    stderr.read_to_end(&mut data).await.map(|_| data)
-                });
-                let status = match timeout(budget, child.wait()).await {
-                    Ok(result) => result?,
-                    Err(_) => {
-                        tokio::process::Command::new("/bin/kill")
-                            .args(["-TERM", &pid.to_string()])
-                            .status()
-                            .await?;
-                        if timeout(Duration::from_secs(30), child.wait())
-                            .await
-                            .is_err()
-                        {
-                            child.kill().await?;
-                        }
-                        let _ = child.wait().await;
-                        output.abort();
-                        errors.abort();
-                        bail!(
-                            "shrink adapter timed out; retained original/workspace must be investigated"
-                        )
-                    }
-                };
-                let bytes = output.await??;
-                let detail = errors.await??;
-                ensure!(
-                    status.success(),
-                    "shrink adapter failed: {}",
-                    String::from_utf8_lossy(&detail)
-                        .chars()
-                        .rev()
-                        .take(2500)
-                        .collect::<String>()
-                        .chars()
-                        .rev()
-                        .collect::<String>()
-                );
-                ensure!(
-                    bytes.len() <= MAX_HOST_MESSAGE,
-                    "shrink proof exceeds message limit"
-                );
-                Ok(serde_json::from_slice(&bytes)?)
+                Worker {
+                    label: "shrink adapter",
+                    script: WORKER,
+                    args: &[],
+                    input: Some(input),
+                    budget,
+                    grace: DEFAULT_GRACE,
+                    max_output: MAX_HOST_MESSAGE,
+                    gid: Some(0),
+                    timeout_hint: "retained original/workspace must be investigated",
+                }
+                .run_json()
+                .await
             }
             Backend::Simulated(world) => self.simulate_shrink(world, input),
         }

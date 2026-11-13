@@ -29,6 +29,9 @@ mod migration;
 mod recovery;
 mod schema_repair;
 mod shrink;
+mod worker;
+
+use worker::{DEFAULT_GRACE, Worker};
 
 pub use schema_repair::{ManagedSchemaRepairReceipt, repair_managed_schema};
 
@@ -3096,18 +3099,19 @@ impl Host {
                 let Backend::Lab(lab) = &self.backend else {
                     bail!("physical inventory unavailable in simulation");
                 };
-                let output = lab
-                    .run(
-                        "python3",
-                        vec![
-                            "-c".into(),
-                            include_str!("host/inventory.py").into(),
-                            self.backend.node().into(),
-                        ],
-                    )
-                    .await?;
-                ensure!(output.len() <= 160 * 1024, "host inventory exceeds limit");
-                let mut inventory: Value = serde_json::from_str(&output)?;
+                let mut inventory = Worker {
+                    label: "host inventory",
+                    script: include_str!("host/inventory.py"),
+                    args: &[self.backend.node()],
+                    input: None,
+                    budget: lab.command_timeout,
+                    grace: DEFAULT_GRACE,
+                    max_output: 160 * 1024,
+                    gid: Some(0),
+                    timeout_hint: "no changes were requested",
+                }
+                .run_json()
+                .await?;
                 inventory["managed_resource_checks"] = self.inspect_adopted_resources().await?;
                 Ok(HostResponse {
                     environment: self.binding.environment.clone(),
