@@ -1,4 +1,5 @@
 use iroh::SecretKey;
+use pve_dev::control::JobKind;
 use pve_dev::control::{
     host::{Fault, FaultPoint, Host, HostConfig, SimulatedWorld, Step, World},
     protocol::*,
@@ -788,7 +789,7 @@ async fn helper_initial_role_proof_refuses_a_forged_member_payload_for_the_admin
     admin.role = Role::Member;
     host.submit(pve_dev::control::store::Job {
         operation_id: "forged-admin-deletion".into(),
-        kind: "delete_user".into(),
+        kind: JobKind::DeleteUser,
         owner: admin,
         vm: None,
         disk_shrink: None,

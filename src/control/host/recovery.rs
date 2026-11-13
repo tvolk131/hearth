@@ -2,6 +2,7 @@
 //! token, never proof of disk contents. A queued recovery rechecks full durable
 //! receipts and current data under the helper execution lock before any change.
 use super::*;
+use crate::control::JobKind;
 use crate::control::vm_change::{JobExtension, RecoveryKind};
 
 impl Host {
@@ -11,7 +12,7 @@ impl Host {
         Ok(Context {
             environment: self.binding.environment.clone(),
             operation_id: id.into(),
-            kind: r.job.kind.clone(),
+            kind: r.job.kind,
             owner: r.job.owner.user_id.clone(),
             budget_mib: r.job.owner.budget_mib,
             vm: r.job.vm.clone(),
@@ -34,7 +35,7 @@ impl Host {
             "start" if self.binding.managed.is_some() => self.inspect_failed_start(context).await,
             "shrink_vm" | "finish_vm_shrink" => {
                 let mut inspected = context.clone();
-                if !quick && context.kind == "shrink_vm" {
+                if !quick && context.kind == JobKind::ShrinkVm {
                     // A shrink abort receipt belongs to the recovery that
                     // performed it, while every preparation receipt remains
                     // bound to the original operation. Only a retained exact
@@ -175,8 +176,8 @@ impl Host {
                 // actual owner/VM checks inside the queued recovery.
                 if step.phase == Phase::Planned
                     && matches!(
-                        context.kind.as_str(),
-                        "grow_vm" | "shrink_vm" | "finish_vm_shrink"
+                        context.kind,
+                        JobKind::GrowVm | JobKind::ShrinkVm | JobKind::FinishVmShrink
                     )
                 {
                     allowed.push(RecoveryKind::ResumeVerifiedEffect);
@@ -193,7 +194,7 @@ impl Host {
                 allowed.push(RecoveryKind::ResumeVerifiedEffect);
             }
             if probe["abort_candidate"] == true
-                && matches!(context.kind.as_str(), "shrink_vm" | "grow_vm")
+                && matches!(context.kind, JobKind::ShrinkVm | JobKind::GrowVm)
             {
                 allowed.push(RecoveryKind::AbortPreparation);
             }
@@ -223,7 +224,7 @@ impl Host {
             "classification":probe["classification"].as_str().unwrap_or("full_verification_required"),
             "allowed_actions":allowed,"proof":probe,
             "evidence":[{"name":"durable_intent","status":if job.status==OperationStatus::Blocked{"blocked"}else{"observed"},"detail":format!("{} at {}; {} verified steps",job.job.kind,job.step,job.steps.iter().filter(|s|s.phase==Phase::Verified).count())},
-            {"name":"verification","status":"pending_full_verification","detail":if context.kind == "start" {"Acknowledge only this failed task after rechecking stopped state, no active VM task, and exact managed VM/storage identities. The VM stays stopped and its allocation remains held."} else {"A recovery job rechecks disk bytes, receipts and identities before accepting or aborting an effect."}}]}),
+            {"name":"verification","status":"pending_full_verification","detail":if context.kind == JobKind::Start {"Acknowledge only this failed task after rechecking stopped state, no active VM task, and exact managed VM/storage identities. The VM stays stopped and its allocation remains held."} else {"A recovery job rechecks disk bytes, receipts and identities before accepting or aborting an effect."}}]}),
         )
     }
     pub(super) async fn run_recovery_step(
@@ -320,7 +321,7 @@ impl Host {
                 json!({"resumed":true,"operation_id":spec.operation_id})
             }
             RecoveryKind::AbortPreparation => {
-                let aborted = if target.kind == "grow_vm" {
+                let aborted = if target.kind == JobKind::GrowVm {
                     "grow_abort"
                 } else {
                     "shrink_abort"
@@ -335,7 +336,7 @@ impl Host {
                         full["abort_safe"] == true,
                         "full inspection does not authorize preparation abort"
                     );
-                    if target.kind == "grow_vm" {
+                    if target.kind == JobKind::GrowVm {
                         self.abort_growth(&target).await?
                     } else {
                         self.abort_shrink(&target, &context.operation_id).await?
@@ -358,7 +359,7 @@ impl Host {
             original.updated_at=Some(super::super::store::now());
             match spec.kind {
                 RecoveryKind::ResumeVerifiedEffect=>{original.status=OperationStatus::Queued;original.finished_at=None;}
-                RecoveryKind::AbortPreparation=>{original.status=OperationStatus::Cancelled;original.step="cancelled".into();original.finished_at=original.updated_at;if target.kind=="shrink_vm" {j.disk_shrinks.remove(&target.vm_id());}}
+                RecoveryKind::AbortPreparation=>{original.status=OperationStatus::Cancelled;original.step="cancelled".into();original.finished_at=original.updated_at;if target.kind==JobKind::ShrinkVm {j.disk_shrinks.remove(&target.vm_id());}}
                 RecoveryKind::AcknowledgeFailedStart=>{original.status=OperationStatus::Cancelled;original.step="failed_start_acknowledged".into();original.finished_at=original.updated_at;}
             }
             for (id,older) in &mut j.jobs {
@@ -439,7 +440,7 @@ impl Host {
 pub(super) fn failed_start_receipt(job: &HostJob, node: &str, vm_id: u16) -> Result<String> {
     ensure!(
         job.status == OperationStatus::Blocked
-            && job.job.kind == "start"
+            && job.job.kind == JobKind::Start
             && job.job.vm.as_ref().is_some_and(|vm| vm.vm_id == vm_id)
             && job.steps.len() == 2
             && job.steps[0].step == Step::Verify
@@ -588,14 +589,14 @@ mod failed_start_tests {
         let original = original();
         assert_eq!(failed_start_receipt(&original, "pve1", 9201).unwrap(), UPID);
         for kind in [
-            "stop",
-            "shutdown",
-            "delete",
-            "create_guest",
-            "recover_operation",
+            JobKind::Stop,
+            JobKind::Shutdown,
+            JobKind::Delete,
+            JobKind::CreateGuest,
+            JobKind::RecoverOperation,
         ] {
             let mut bad = original.clone();
-            bad.job.kind = kind.into();
+            bad.job.kind = kind;
             assert!(failed_start_receipt(&bad, "pve1", 9201).is_err());
         }
         for status in [

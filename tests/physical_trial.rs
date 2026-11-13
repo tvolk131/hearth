@@ -1,3 +1,4 @@
+use pve_dev::control::JobKind;
 use std::collections::{BTreeMap, BTreeSet};
 
 use iroh::SecretKey;
@@ -109,7 +110,7 @@ fn full_featured_server_configuration_initializes_64gib_with_an_admissible_boots
         assert_eq!(pending.len(), 1);
         let bootstrap = &pending[0];
         assert_eq!(bootstrap.public.status, OperationStatus::Queued);
-        assert_eq!(bootstrap.job.kind, "ensure_user");
+        assert_eq!(bootstrap.job.kind, JobKind::EnsureUser);
         assert!(bootstrap.job.vm.is_none());
         assert_eq!(bootstrap.job.owner.user_id, "trial-admin");
         assert_eq!(bootstrap.job.owner.role, Role::Admin);
@@ -292,7 +293,7 @@ fn physical_shutdown_admission_matches_helper_and_advertised_scope_capabilities(
             [started["operation_id"].as_str().unwrap()]
         .job
         .clone();
-        hypothetical.kind = "shutdown".into();
+        hypothetical.kind = JobKind::Shutdown;
         assert_eq!(
             helper.validate_job(&hypothetical).is_ok(),
             allowed,
@@ -313,7 +314,7 @@ fn physical_shutdown_admission_matches_helper_and_advertised_scope_capabilities(
             let pending = store.pending().unwrap();
             assert_eq!(pending.len(), 1);
             helper.validate_job(&pending[0].job).unwrap();
-            assert_eq!(pending[0].job.kind, "shutdown");
+            assert_eq!(pending[0].job.kind, JobKind::Shutdown);
             assert_eq!(store.read().unwrap().vms[&vm_id].state, VmState::Running);
             finish(&store);
             assert_eq!(store.read().unwrap().vms[&vm_id].state, VmState::Stopped);

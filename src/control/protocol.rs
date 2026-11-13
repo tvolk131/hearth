@@ -338,7 +338,7 @@ pub struct Operation {
     pub operation_id: String,
     pub owner: String,
     pub request_id: String,
-    pub kind: String,
+    pub kind: super::JobKind,
     pub vm_id: Option<u16>,
     pub status: OperationStatus,
     pub step: String,

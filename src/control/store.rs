@@ -1,3 +1,4 @@
+use crate::control::JobKind;
 use std::{
     collections::BTreeMap,
     path::Path,
@@ -208,7 +209,7 @@ pub struct Device {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Job {
     pub operation_id: String,
-    pub kind: String,
+    pub kind: JobKind,
     pub owner: User,
     pub vm: Option<Vm>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -596,7 +597,7 @@ fn queue(
     actor: &User,
     request_id: &str,
     fingerprint: &str,
-    kind: &str,
+    kind: JobKind,
     owner: User,
     vm: Option<Vm>,
 ) -> Value {
@@ -605,7 +606,7 @@ fn queue(
         operation_id: operation_id.clone(),
         owner: owner.user_id.clone(),
         request_id: request_id.into(),
-        kind: kind.into(),
+        kind,
         vm_id: vm.as_ref().map(|vm| vm.vm_id),
         status: OperationStatus::Queued,
         step: "intent_committed".into(),
@@ -622,7 +623,7 @@ fn queue(
     };
     let job = Job {
         operation_id: operation_id.clone(),
-        kind: kind.into(),
+        kind,
         owner,
         vm,
         policy_change: None,
@@ -783,7 +784,7 @@ impl Store {
             &administrator,
             "bootstrap",
             "bootstrap",
-            "ensure_user",
+            JobKind::EnsureUser,
             administrator.clone(),
             None,
         );
@@ -900,10 +901,10 @@ impl Store {
             let original=catalog.operations.get(operation_id).ok_or_else(||failure("invalid","original operation missing"))?.clone();
             if original.public.status!=OperationStatus::Blocked {return Err(failure("conflict","original operation is no longer blocked"));}
             if (catalog.binding.managed.is_some()
-                && (kind != super::vm_change::RecoveryKind::AcknowledgeFailedStart || original.public.kind != "start"))
+                && (kind != super::vm_change::RecoveryKind::AcknowledgeFailedStart || original.public.kind != JobKind::Start))
                 || (catalog.binding.managed.is_none() && kind == super::vm_change::RecoveryKind::AcknowledgeFailedStart)
             {return Err(failure("forbidden","failed-start acknowledgment is limited to managed start operations"));}
-            let accepted=queue(catalog,&actor,request_id,&fingerprint,"recover_operation",original.job.owner.clone(),original.job.vm.clone());
+            let accepted=queue(catalog,&actor,request_id,&fingerprint,JobKind::RecoverOperation,original.job.owner.clone(),original.job.vm.clone());
             let id=accepted["operation_id"].as_str().expect("operation ID");
             catalog.operations.get_mut(id).expect("queued recovery").job.extension=Some(Box::new(super::vm_change::JobExtension::Recover(super::vm_change::RecoverySpec{operation_id:operation_id.into(),inspection_id:inspection_id.into(),kind})));
             catalog.schema=catalog.schema.max(6);Ok(accepted)
@@ -1010,7 +1011,7 @@ impl Store {
                     if current.remaining_mib<disk_charge(&plan.vm) || current.min_memory_allocated_mib+plan.vm.min_memory_mib>user.min_memory_budget_mib || current.memory_allocated_mib+plan.vm.memory_mib>user.max_memory_budget_mib || current.cores_allocated+u64::from(plan.vm.cores)>u64::from(user.max_cores) || catalog.vms.values().filter(|v|v.owner==owner && v.state!=VmState::Deleted).count()>=usize::from(user.max_vms) {return Err(failure("conflict","owner policy cannot cover the existing VM"));}
                     if let Some(scope)=&catalog.binding.physical_trial && !scope.scope.permits(&owner,Some(vm_id)) {return Err(failure("forbidden","enrollment escapes physical scope"));}
                     let mut admitted=plan.vm.clone();admitted.state=VmState::Creating;catalog.vms.insert(vm_id,admitted);
-                    let accepted=queue(catalog,&actor,&request_id,&fingerprint,"enroll_vm",user,Some(plan.vm.clone()));
+                    let accepted=queue(catalog,&actor,&request_id,&fingerprint,JobKind::EnrollVm,user,Some(plan.vm.clone()));
                     let id=accepted["operation_id"].as_str().expect("operation ID");catalog.operations.get_mut(id).expect("queued enrollment").job.extension=Some(Box::new(super::vm_change::JobExtension::Enroll(super::vm_change::EnrollmentSpec{plan})));
                     catalog.schema=catalog.schema.max(6);Ok(accepted)
                 }
@@ -1025,7 +1026,7 @@ impl Store {
                     if vm.disk_mib!=expected_disk_mib {return Err(failure("conflict","disk size changed since review"));}
                     let owner=catalog.users[&vm.owner].clone();
                     let spec=super::vm_change::GrowthSpec {previous_disk_mib:expected_disk_mib,target_disk_mib,root_partition_uuid};
-                    let accepted=queue(catalog,&actor,&request_id,&fingerprint,"grow_vm",owner,Some(vm.clone()));
+                    let accepted=queue(catalog,&actor,&request_id,&fingerprint,JobKind::GrowVm,owner,Some(vm.clone()));
                     let id=accepted["operation_id"].as_str().expect("operation id").to_string();
                     catalog.operations.get_mut(&id).expect("queued operation").job.extension=Some(Box::new(super::vm_change::JobExtension::Grow(spec.clone())));
                     catalog.disk_growths.insert(vm_id,super::vm_change::PendingGrowth {operation_id:id,vm_id,owner:vm.owner,spec});
@@ -1046,7 +1047,7 @@ impl Store {
                     let vm = catalog.vms[&vm_id].clone();
                     let owner = catalog.users[&vm.owner].clone();
                     let spec = ShrinkSpec { previous_disk_mib: expected_disk_mib, target_disk_mib, preparation_id: None, root_partition_uuid };
-                    let value = queue(catalog, &actor, &request_id, &fingerprint, "shrink_vm", owner, Some(vm.clone()));
+                    let value = queue(catalog, &actor, &request_id, &fingerprint, JobKind::ShrinkVm, owner, Some(vm.clone()));
                     let id = value["operation_id"].as_str().expect("queued operation");
                     catalog.operations.get_mut(id).expect("queued operation").job.disk_shrink = Some(Box::new(spec.clone()));
                     catalog.disk_shrinks.insert(vm_id, PendingShrink { operation_id: id.into(), vm_id, owner: vm.owner, spec, prepared: false });
@@ -1065,7 +1066,7 @@ impl Store {
                         return Err(failure("conflict", "finish requires the exact prepared shrink, a stopped verified guest and a settled owner"));
                     }
                     let owner = catalog.users[&vm.owner].clone();
-                    let value = queue(catalog, &actor, &request_id, &fingerprint, "finish_vm_shrink", owner, Some(vm));
+                    let value = queue(catalog, &actor, &request_id, &fingerprint, JobKind::FinishVmShrink, owner, Some(vm));
                     let id = value["operation_id"].as_str().expect("queued operation");
                     let mut spec = hold.spec; spec.preparation_id = Some(preparation_id);
                     catalog.operations.get_mut(id).expect("queued operation").job.disk_shrink = Some(Box::new(spec));
@@ -1131,7 +1132,7 @@ impl Store {
                     }
                     let user = User { user_id, role: Role::Member, budget_mib, min_memory_budget_mib, max_memory_budget_mib, max_cores, max_vms, ready: false, policy_revision: 0, state: AccountState::Active };
                     catalog.users.insert(user.user_id.clone(), user.clone());
-                    Ok(queue(catalog, &actor, &request_id, &fingerprint, "ensure_user", user, None))
+                    Ok(queue(catalog, &actor, &request_id, &fingerprint, JobKind::EnsureUser, user, None))
                 }
                 Request::UpdateUserPolicy { request_id, user_id, expected_revision, policy } => {
                     admin(&actor)?;
@@ -1154,7 +1155,7 @@ impl Store {
                         || capacity.1 + target.min_memory_budget_mib.saturating_sub(previous.min_memory_budget_mib) > catalog.binding.min_memory_capacity_mib {
                         return Err(failure("conflict", "host budget exhausted, including pending policy reservations"));
                     }
-                    let value = queue(catalog, &actor, &request_id, &fingerprint, "update_user_policy", previous.clone(), None);
+                    let value = queue(catalog, &actor, &request_id, &fingerprint, JobKind::UpdateUserPolicy, previous.clone(), None);
                     let id = value["operation_id"].as_str().expect("queued operation");
                     catalog.operations.get_mut(id).expect("queued operation").job.policy_change = Some(Box::new(PolicyChange { previous, target }));
                     catalog.users.get_mut(&user_id).expect("existing owner").ready = false;
@@ -1175,7 +1176,7 @@ impl Store {
                     if catalog.vms.values().any(|vm| vm.owner == user_id && vm.state != VmState::Deleted) {
                         return Err(failure("conflict", "delete every VM explicitly and wait for verified deletion before deleting this account; no cascade is performed"));
                     }
-                    let result = queue(catalog, &actor, &request_id, &fingerprint, "delete_user", owner, None);
+                    let result = queue(catalog, &actor, &request_id, &fingerprint, JobKind::DeleteUser, owner, None);
                     let user = catalog.users.get_mut(&user_id).expect("existing user");
                     user.state = AccountState::Deleting; user.ready = false;
                     for device in catalog.devices.values_mut().filter(|device| device.user_id == user_id) { device.revoked = true; }
@@ -1212,7 +1213,7 @@ impl Store {
                     let machines: Vec<_> = catalog.vms.values().filter(|vm| vm.owner == owner_id && vm.state != VmState::Deleted && uses_namespace_budget(catalog, vm)).collect();
                     if machines.iter().any(|vm| vm.name == name) { return Err(failure("conflict", "VM name already allocated")); }
                     let vm_id = (9001..=9299).find(|id| !catalog.vms.contains_key(id) && !catalog.imported_vms.iter().any(|r| r.vm.vm_id==*id) && if let Some(m)=&catalog.binding.managed { m.scope.vm_ids.contains(id) } else { (9001..=9099).contains(id) && catalog.binding.physical_trial.as_ref().is_none_or(|trial| trial.scope.vm_ids.contains(id)) }).ok_or_else(|| failure("conflict", "lab VM identifiers exhausted"))?;
-                    let kind = if guest.is_some() { "create_guest" } else { "create" };
+                    let kind = if guest.is_some() { JobKind::CreateGuest } else { JobKind::Create };
                     let vm = Vm { vm_id, owner: owner.user_id.clone(), name, disk_mib, memory_mib, min_memory_mib, cores, state: VmState::Creating, guest: guest.map(Box::new) };
                     let usage = budget(catalog, &owner);
                     if machines.len() >= usize::from(owner.max_vms) || usage.allocated_mib + disk_charge(&vm) > owner.budget_mib
@@ -1231,8 +1232,8 @@ impl Store {
                     if vm.state == VmState::Deleted || catalog.operations.values().any(|record| record.public.vm_id == Some(vm_id) && !record.public.status.is_terminal()) {
                         return Err(failure("conflict", "VM is deleted, busy, or blocked pending investigation"));
                     }
-                    let kind = match kind { VmAction::Start => "start", VmAction::Shutdown => "shutdown", VmAction::Stop => "stop", VmAction::Delete => "delete" };
-                    if kind == "shutdown" {
+                    let kind = match kind { VmAction::Start => JobKind::Start, VmAction::Shutdown => JobKind::Shutdown, VmAction::Stop => JobKind::Stop, VmAction::Delete => JobKind::Delete };
+                    if kind == JobKind::Shutdown {
                         if catalog.binding.physical_trial.as_ref().is_some_and(|trial| {
                             !trial.scope.features.contains("resize") && !trial.scope.features.contains("migration")
                         }) { return Err(failure("forbidden", "graceful shutdown is currently lab-qualified only")); }
@@ -1240,9 +1241,9 @@ impl Store {
                     }
                     if catalog.users[&vm.owner].state != AccountState::Active { return Err(failure("conflict", "owner is inactive or being deleted")); }
                     let shrink_lifecycle = catalog.disk_shrinks.get(&vm_id).is_some_and(|s| s.prepared)
-                        && matches!(kind, "start" | "stop" | "shutdown");
+                        && kind.is_lifecycle();
                     if policy_busy(catalog, &vm.owner) && !shrink_lifecycle { return Err(failure("conflict", "owner policy change or disk shrink recovery is pending or blocked")); }
-                    if kind == "delete" { catalog.vms.get_mut(&vm_id).expect("existing VM").state = VmState::Deleting; }
+                    if kind == JobKind::Delete { catalog.vms.get_mut(&vm_id).expect("existing VM").state = VmState::Deleting; }
                     let owner = catalog.users[&vm.owner].clone();
                     Ok(queue(catalog, &actor, &request_id, &fingerprint, kind, owner, Some(vm)))
                 }
@@ -1295,12 +1296,12 @@ impl Store {
                 }
                 record.public.progress = Some(progress.clone());
             }
-            if status==OperationStatus::Verified && record.public.kind=="recover_operation" {
+            if status==OperationStatus::Verified && record.public.kind==JobKind::RecoverOperation {
                 let Some(super::vm_change::JobExtension::Recover(spec))=record.job.extension.as_deref() else {return Err(failure("internal","recovery payload missing"));};
                 let spec=spec.clone();
                 let original=catalog.operations.get_mut(&spec.operation_id).ok_or_else(||failure("internal","original operation missing"))?;
                 if original.public.status!=OperationStatus::Blocked {return Err(failure("internal","original recovery state changed"));}
-                let kind=original.public.kind.clone();let vm_id=original.public.vm_id;
+                let kind=original.public.kind;let vm_id=original.public.vm_id;
                 if spec.kind != super::vm_change::RecoveryKind::AcknowledgeFailedStart {original.public.error=None;}
                 match spec.kind {
                     super::vm_change::RecoveryKind::ResumeVerifiedEffect=>{original.public.status=OperationStatus::Queued;original.public.step="reconciled_waiting_for_helper".into();}
@@ -1311,8 +1312,8 @@ impl Store {
                     let vm=catalog.vms.get_mut(&vm_id).ok_or_else(||failure("internal","recovered VM missing"))?;
                     vm.state=if matches!(spec.kind,super::vm_change::RecoveryKind::AbortPreparation | super::vm_change::RecoveryKind::AcknowledgeFailedStart) {VmState::Stopped}else{VmState::Creating};
                     if spec.kind==super::vm_change::RecoveryKind::AbortPreparation {
-                        if kind=="shrink_vm" {catalog.disk_shrinks.remove(&vm_id);}
-                        if kind=="grow_vm" {catalog.disk_growths.remove(&vm_id);}
+                        if kind==JobKind::ShrinkVm {catalog.disk_shrinks.remove(&vm_id);}
+                        if kind==JobKind::GrowVm {catalog.disk_growths.remove(&vm_id);}
                     }
                 }
                 for (id,r) in &mut catalog.operations {
@@ -1327,29 +1328,31 @@ impl Store {
                 let machine = catalog.vms.get_mut(&vm_id).expect("operation VM exists");
                 if status == OperationStatus::Blocked { machine.state = VmState::Blocked; }
                 if status == OperationStatus::Verified {
-                    machine.state = match record.public.kind.as_str() {
-                        "create" | "create_guest" | "stop" | "shutdown" | "shrink_vm" | "finish_vm_shrink" | "grow_vm" | "enroll_vm" => VmState::Stopped,
-                        "start" => VmState::Running,
-                        "delete" => VmState::Deleted,
-                        _ => return Err(failure("internal", "unknown VM operation")),
+                    machine.state = match record.public.kind {
+                        JobKind::Create | JobKind::CreateGuest | JobKind::Stop | JobKind::Shutdown | JobKind::ShrinkVm
+                        | JobKind::FinishVmShrink | JobKind::GrowVm | JobKind::EnrollVm => VmState::Stopped,
+                        JobKind::Start => VmState::Running,
+                        JobKind::Delete => VmState::Deleted,
+                        JobKind::EnsureUser | JobKind::DeleteUser | JobKind::UpdateUserPolicy | JobKind::RecoverOperation
+                        | JobKind::Migration | JobKind::Inspect => return Err(failure("internal", "unknown VM operation")),
                     };
-                    if record.public.kind == "shrink_vm" {
+                    if record.public.kind == JobKind::ShrinkVm {
                         let hold = catalog.disk_shrinks.get_mut(&vm_id).ok_or_else(|| failure("internal", "shrink hold missing"))?;
                         machine.disk_mib = hold.spec.target_disk_mib;
                         hold.prepared = true;
                     }
-                    if record.public.kind == "finish_vm_shrink" { catalog.disk_shrinks.remove(&vm_id); }
-                    if record.public.kind == "enroll_vm" {
+                    if record.public.kind == JobKind::FinishVmShrink { catalog.disk_shrinks.remove(&vm_id); }
+                    if record.public.kind == JobKind::EnrollVm {
                         let Some(super::vm_change::JobExtension::Enroll(spec))=record.job.extension.as_deref() else {return Err(failure("internal","enrollment payload missing"));};
                         catalog.enrollments.insert(vm_id,spec.clone());
                     }
-                    if record.public.kind == "grow_vm" {
+                    if record.public.kind == JobKind::GrowVm {
                         let hold=catalog.disk_growths.remove(&vm_id).ok_or_else(||failure("internal","growth hold missing"))?;
                         machine.disk_mib=hold.spec.target_disk_mib;
                     }
 
                 }
-            } else if status == OperationStatus::Verified && record.public.kind == "delete_user" {
+            } else if status == OperationStatus::Verified && record.public.kind == JobKind::DeleteUser {
                 let owner = catalog.users.get_mut(&record.public.owner).expect("operation account exists");
                 if owner.state != AccountState::Deleting || owner.policy_revision != record.job.owner.policy_revision
                     || owner.policy() != record.job.owner.policy() {

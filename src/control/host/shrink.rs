@@ -1,6 +1,7 @@
 //! Conservative shrink execution. Ambiguous intents block on every host boot;
 //! no filesystem conversion, rename or recovery deletion is blindly replayed.
 use super::*;
+use crate::control::JobKind;
 
 pub(super) const WORKER: &str = include_str!("../shrink_worker.py");
 const SOURCE_KEYS: &[&str] = &[
@@ -63,7 +64,7 @@ impl Host {
             .job
             .clone();
         ensure!(
-            original.kind == "shrink_vm"
+            original.kind == JobKind::ShrinkVm
                 && original.owner == self.journal()?.jobs[&context.operation_id].job.owner,
             "preparation owner/policy differs from finish payload"
         );

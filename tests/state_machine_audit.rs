@@ -99,7 +99,7 @@ fn machine() -> Vm {
 fn job(id: &str, kind: &str, vm: Option<Vm>) -> Job {
     Job {
         operation_id: id.into(),
-        kind: kind.into(),
+        kind: kind.parse().unwrap(),
         owner: owner(),
         vm,
         disk_shrink: None,

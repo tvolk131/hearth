@@ -1,3 +1,4 @@
+use pve_dev::control::JobKind;
 use pve_dev::control::{
     managed::ManagedConfig,
     protocol::{OperationStatus, Request, VmAction},
@@ -116,7 +117,7 @@ fn adopted_vm_uses_its_allocation_without_consuming_the_new_namespace_budget() {
     wrong.vm.as_mut().unwrap().disk_mib -= 1;
     assert!(c.binding.validate_job(&wrong).is_err());
     wrong = job.clone();
-    wrong.kind = "create_guest".into();
+    wrong.kind = JobKind::CreateGuest;
     assert!(c.binding.validate_job(&wrong).is_err());
     wrong = job;
     wrong.owner.user_id = "ivan".into();

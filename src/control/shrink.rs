@@ -1,4 +1,5 @@
 //! The allocation contract for a two-stage, offline lab disk shrink.
+use crate::control::JobKind;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -74,7 +75,7 @@ pub fn validate_catalog(c: &super::store::Catalog) -> anyhow::Result<()> {
             .get(&hold.operation_id)
             .context("shrink operation missing")?;
         ensure!(
-            record.job.kind == "shrink_vm"
+            record.job.kind == JobKind::ShrinkVm
                 && record.public.vm_id == Some(*id)
                 && record.job.disk_shrink.as_deref() == Some(&hold.spec)
                 && record.public.owner == hold.owner
@@ -93,7 +94,11 @@ pub fn validate_catalog(c: &super::store::Catalog) -> anyhow::Result<()> {
             "shrink catalog profile mismatch"
         );
     }
-    for record in c.operations.values().filter(|r| r.job.kind == "shrink_vm") {
+    for record in c
+        .operations
+        .values()
+        .filter(|r| r.job.kind == JobKind::ShrinkVm)
+    {
         ensure!(
             c.schema >= 5 && record.job.disk_shrink.as_ref().is_some_and(|s| s.valid()),
             "shrink operation requires schema5 and a valid payload"
@@ -107,7 +112,7 @@ pub fn validate_catalog(c: &super::store::Catalog) -> anyhow::Result<()> {
                 }))
                 || c.operations
                     .values()
-                    .any(|r| r.job.kind == "finish_vm_shrink"
+                    .any(|r| r.job.kind == JobKind::FinishVmShrink
                         && r.public.status == OperationStatus::Verified
                         && r.job
                             .disk_shrink
@@ -138,7 +143,7 @@ pub fn validate_journal(j: &super::host::Journal) -> anyhow::Result<()> {
             .get(&hold.operation_id)
             .context("helper shrink operation missing")?;
         ensure!(
-            record.job.kind == "shrink_vm"
+            record.job.kind == JobKind::ShrinkVm
                 && record
                     .job
                     .vm
@@ -156,7 +161,7 @@ pub fn validate_journal(j: &super::host::Journal) -> anyhow::Result<()> {
     for record in j
         .jobs
         .values()
-        .filter(|r| r.job.kind == "shrink_vm" && !r.steps.is_empty())
+        .filter(|r| r.job.kind == JobKind::ShrinkVm && !r.steps.is_empty())
     {
         ensure!(
             j.schema >= 5 && record.job.disk_shrink.as_ref().is_some_and(|s| s.valid()),
@@ -170,7 +175,7 @@ pub fn validate_journal(j: &super::host::Journal) -> anyhow::Result<()> {
                     matches!(r.job.extension.as_deref(),Some(super::vm_change::JobExtension::Recover(s)) if s.operation_id == record.job.operation_id && s.kind == super::vm_change::RecoveryKind::AbortPreparation)
                     && r.steps.iter().any(|s|s.step==Step::Recover && s.phase==Phase::Verified)
                 }))
-                || j.jobs.values().any(|r| r.job.kind == "finish_vm_shrink"
+                || j.jobs.values().any(|r| r.job.kind == JobKind::FinishVmShrink
                     && r.job
                         .disk_shrink
                         .as_ref()

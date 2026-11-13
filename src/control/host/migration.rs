@@ -1,6 +1,7 @@
 //! Scoped migration helper. The network daemon supplies only an immutable plan
 //! and bounded chunks; local creation records choose every path and resource.
 use super::*;
+use crate::control::JobKind;
 use crate::control::migration::{
     self as wire, HostMigrationRequest, HostTransferRecord, Manifest, Phase as TransferPhase,
     Role as TransferRole, Snapshot, VolumeManifest,
@@ -108,7 +109,7 @@ impl Host {
         Ok(Context {
             environment: self.binding.environment.clone(),
             operation_id: id.into(),
-            kind: "migration".into(),
+            kind: JobKind::Migration,
             owner: machine.owner.clone(),
             budget_mib: owner.budget_mib,
             vm: Some(Vm {
