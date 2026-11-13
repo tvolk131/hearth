@@ -1,0 +1,14 @@
+pub mod adoption;
+pub mod guest;
+pub mod host;
+pub mod maintenance;
+pub mod managed;
+pub mod migration;
+pub mod migration_transport;
+pub mod physical_trial;
+pub mod protocol;
+pub mod services;
+pub mod shrink;
+pub mod store;
+pub mod transport;
+pub mod vm_change;

@@ -1,0 +1,82 @@
+{
+  "environment": "0123456789abcdef0123456789abcdef",
+  "binding": {
+    "pool_guid": "111",
+    "scope": {
+      "node": "pve1",
+      "pool": "rpool",
+      "root_dataset": "rpool/pve-dev-managed-0123456789abcdef0123456789abcdef",
+      "root_guid": "222",
+      "machine_id_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "storage_prefix": "managed-01234567-",
+      "owners": [
+        "erin",
+        "frank",
+        "heidi"
+      ],
+      "vm_ids": [
+        9201,
+        9202
+      ],
+      "capacity_mib": 32768,
+      "min_memory_capacity_mib": 4096,
+      "memory_capacity_mib": 8192,
+      "cores_capacity": 8,
+      "limits": {
+        "disk_mib": 16384,
+        "budget_mib": 24576,
+        "min_memory_mib": 4096,
+        "memory_mib": 8192,
+        "cores": 8
+      }
+    },
+    "admin_user": "erin",
+    "admin_policy": {
+      "budget_mib": 8192,
+      "min_memory_budget_mib": 512,
+      "max_memory_budget_mib": 2048,
+      "max_cores": 4,
+      "max_vms": 2
+    },
+    "admin_only_mutations": true,
+    "guest_network": {
+      "bridge": "vmbr1",
+      "subnet": "10.0.0.0/24",
+      "gateway": "10.0.0.1",
+      "dns": "1.1.1.1",
+      "addresses": {
+        "9201": "10.0.0.201",
+        "9202": "10.0.0.202"
+      }
+    },
+    "cpu": "host",
+    "images": [
+      {
+        "path": "/var/lib/pve-dev-images/04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94.qcow2",
+        "image_sha256": "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94",
+        "label": "Ubuntu24.04LTS",
+        "os_version": "24.04",
+        "default_user": "ubuntu",
+        "min_disk_mib": 4096
+      }
+    ],
+    "imported_vms": [
+      {
+        "vm": {
+          "vm_id": 101,
+          "owner": "erin",
+          "name": "dev-erin",
+          "disk_mib": 1310720,
+          "memory_mib": 32768,
+          "min_memory_mib": 12288,
+          "cores": 8,
+          "state": "running"
+        },
+        "label": "Existing VM (imported)",
+        "observed_at": 1794500000,
+        "configuration_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "reason": "Imported without changing guest/config/storage; legacy mutation not qualified"
+      }
+    ]
+  }
+}

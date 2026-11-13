@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "debian_url": "https://cloud.debian.org/images/cloud/trixie/20261103-2651/debian-13-generic-amd64-20261103-2651.qcow2",
+  "debian_sha512": "1207e6e3efaff8ee77ab7a32c156a3eea6a9e53f94cfc48efbd1f49ba554ca36ac62ab27395aa813a1775a8c0a393b1a1ce5377d9e5670f6113e3110c57fee4b",
+  "proxmox_key_url": "https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg",
+  "proxmox_key_sha256": "136673be77aba35dcce385b28737689ad64fd785a797e57897589aed08db6e45"
+}

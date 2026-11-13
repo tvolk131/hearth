@@ -1,0 +1,42 @@
+[Unit]
+Description=Privileged local disposable-Proxmox-lab pve-dev helper
+After=pve-cluster.service
+Requires=pve-cluster.service
+ConditionHost=pve-lab
+ConditionPathExists=/etc/pve-dev-lab-id
+ConditionPathExists=/etc/pve-dev-host/lab.json
+ConditionPathExists=!/var/lib/pve-dev-host/restore-review-required
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+Group=pve-dev
+UMask=0077
+ExecStart=/usr/local/libexec/pve-dev/pve-dev-host serve --state-dir /var/lib/pve-dev-host --socket /run/pve-dev-host/host.sock --lab-config /etc/pve-dev-host/lab.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=120s
+KillMode=control-group
+RuntimeDirectory=pve-dev-host
+RuntimeDirectoryMode=0750
+StateDirectory=pve-dev-host
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectSystem=full
+ReadWritePaths=/etc/pve
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# PrivateDevices and namespace restrictions would break ZFS/QEMU operations.
+# The executable independently attests hostname, nonce and exact labpool GUID.
+
+[Install]
+WantedBy=multi-user.target

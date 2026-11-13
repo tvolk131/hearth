@@ -1,0 +1,81 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Nightly run of the slow nested-Proxmox lab job.
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-and-recovery:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@9383ce2bf08796b65508822f5982f49151badc4e
+      - name: Rust, safety, and crash-recovery tests
+        run: nix develop ./nix#checks --command bash scripts/check.sh
+      - name: Real daemon, helper, and CLI process integration
+        run: nix develop ./nix#checks --command python3 scripts/test-control-local.py --quota --user-deletion
+
+  swift-client:
+    if: github.event_name != 'schedule'
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@9383ce2bf08796b65508822f5982f49151badc4e
+      - name: Build Rust client and simulated services
+        run: nix develop ./nix#checks --command cargo build --locked --bins
+      - name: Swift builds, tests, and real Rust RPC integration
+        run: python3 scripts/test-control-local.py --quota --user-deletion --swift
+
+  real-proxmox:
+    # Boots a disposable Proxmox VE under software emulation (~1-2h), so it runs
+    # nightly and on demand rather than on every push.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      PVE_LAB_MIN_FREE_GIB: '3'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@9383ce2bf08796b65508822f5982f49151badc4e
+      - name: Available runner resources
+        run: df -h .; free -h
+      - name: Install portable Linux Rust target on the disposable runner
+        run: rustup toolchain install 1.99.1 --profile minimal --target x86_64-unknown-linux-musl
+      - name: Build static Linux controller and helper
+        run: nix develop ./nix --command bash scripts/build-lab-binaries.sh
+      - name: Authenticated controller and bootable guests against real Proxmox
+        run: nix develop ./nix --command python3 lab/lab.py guest-test --linux-bin-dir target/x86_64-unknown-linux-musl/release --timeout 1800
+      - name: Save diagnostics, never virtual disks or private lab keys
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: proxmox-lab-evidence
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            .lab/run-*/evidence/
+            .lab/base/build.json
+            .lab/base/packages.txt
+            .lab/base/qemu.log

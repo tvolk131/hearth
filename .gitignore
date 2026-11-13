@@ -1,0 +1,10 @@
+/target/
+*.sqlite*
+*.lockfile
+/.lab/
+__pycache__/
+*.redb
+*.pyc
+.DS_Store
+.build/
+/evidence/

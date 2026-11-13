@@ -1,0 +1,42 @@
+[Unit]
+Description=Experimental authenticated pve-dev lab controller
+Requires=pve-dev-host.service
+After=network-online.target pve-dev-host.service
+Wants=network-online.target
+ConditionPathExists=/var/lib/pve-dev/controller/initialized
+ConditionPathExists=!/var/lib/pve-dev/controller/restore-review-required
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pve-dev
+Group=pve-dev
+UMask=0077
+WorkingDirectory=/var/lib/pve-dev
+ExecStart=/usr/local/libexec/pve-dev/pve-devd serve --data-dir /var/lib/pve-dev/controller
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=60s
+KillMode=control-group
+StateDirectory=pve-dev
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/pve-dev
+ReadOnlyPaths=/run/pve-dev-host
+
+[Install]
+WantedBy=multi-user.target
