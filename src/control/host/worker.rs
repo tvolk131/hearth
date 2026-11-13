@@ -24,6 +24,8 @@ use super::SAFE_PATH;
 pub(super) const DEFAULT_GRACE: Duration = Duration::from_secs(30);
 /// How much of the worker's stderr is kept in an error message.
 const STDERR_TAIL_CHARS: usize = 2500;
+/// How much of the worker's stderr is held in memory; older output is dropped.
+const STDERR_KEEP_BYTES: usize = 64 * 1024;
 
 pub(super) struct Worker<'a> {
     /// Short name used in error messages, e.g. "shrink adapter".
@@ -97,13 +99,28 @@ impl Worker<'_> {
             std::io::Result::Ok(bytes)
         });
         let errors = tokio::spawn(async move {
-            let mut bytes = Vec::new();
-            stderr.read_to_end(&mut bytes).await.map(|_| bytes)
+            // Keep only the most recent output so a flood cannot grow memory.
+            let mut kept = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = stderr.read(&mut chunk).await?;
+                if n == 0 {
+                    break;
+                }
+                kept.extend_from_slice(&chunk[..n]);
+                if kept.len() > 2 * STDERR_KEEP_BYTES {
+                    kept.drain(..kept.len() - STDERR_KEEP_BYTES);
+                }
+            }
+            std::io::Result::Ok(kept)
         });
 
         let status = match timeout(self.budget, child.get().wait()).await {
             Ok(status) => status?,
             Err(_) => {
+                if let Some(writer) = &writer {
+                    writer.abort();
+                }
                 child.terminate().await;
                 output.abort();
                 errors.abort();
@@ -152,6 +169,9 @@ fn stderr_tail(bytes: &[u8]) -> String {
 struct Supervised {
     child: Option<Child>,
     grace: Duration,
+    /// SIGTERM already sent. Workers must get it exactly once: a second
+    /// signal would interrupt their own cleanup handler.
+    signalled: bool,
 }
 
 impl Supervised {
@@ -159,6 +179,7 @@ impl Supervised {
         Self {
             child: Some(child),
             grace,
+            signalled: false,
         }
     }
 
@@ -171,11 +192,19 @@ impl Supervised {
         self.child = None;
     }
 
-    /// SIGTERM, wait up to the grace period, then SIGKILL, and reap.
+    /// SIGTERM, wait up to the grace period, then SIGKILL, and reap. The
+    /// child stays owned by `self` until it is reaped, so a caller cancelled
+    /// during the grace period still escalates through `Drop`.
     async fn terminate(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            stop(&mut child, self.grace).await;
+        let grace = self.grace;
+        if let Some(child) = self.child.as_mut() {
+            if !self.signalled {
+                signal_term(child);
+                self.signalled = true;
+            }
+            escalate(child, grace).await;
         }
+        self.child = None;
     }
 }
 
@@ -184,18 +213,20 @@ impl Drop for Supervised {
         let Some(mut child) = self.child.take() else {
             return;
         };
-        signal_term(&mut child);
+        if !self.signalled {
+            signal_term(&mut child);
+        }
         // Without a runtime to wait on, the worker still has SIGTERM and its
         // parent-death signal; dropping the handle does not kill it.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             let grace = self.grace;
-            runtime.spawn(async move { stop(&mut child, grace).await });
+            runtime.spawn(async move { escalate(&mut child, grace).await });
         }
     }
 }
 
-async fn stop(child: &mut Child, grace: Duration) {
-    signal_term(child);
+/// After SIGTERM: wait up to `grace`, then SIGKILL, and reap.
+async fn escalate(child: &mut Child, grace: Duration) {
     if timeout(grace, child.wait()).await.is_err() {
         let _ = child.kill().await;
     }
@@ -257,7 +288,7 @@ mod tests {
     const SESSION_WORKER: &str = r#"
 import json, os, signal, subprocess, sys, time
 params = json.loads(sys.stdin.read())
-child = subprocess.Popen(["sleep", "300"], start_new_session=True)
+child = subprocess.Popen(["sleep", "60"], start_new_session=True)
 def stop(signum, frame):
     os.killpg(child.pid, signal.SIGTERM)
     child.wait()
@@ -265,7 +296,7 @@ def stop(signum, frame):
 signal.signal(signal.SIGTERM, stop)
 with open(params["pid_file"], "w") as f:
     f.write(str(child.pid))
-time.sleep(300)
+time.sleep(60)
 "#;
 
     async fn grandchild_pid(path: &std::path::Path) -> i32 {
@@ -326,7 +357,7 @@ time.sleep(300)
         let pid_file = dir.path().join("pid");
         let input = json!({"pid_file": pid_file.clone()});
         let run = tokio::spawn(async move {
-            worker(SESSION_WORKER, Some(&input), Duration::from_secs(2))
+            worker(SESSION_WORKER, Some(&input), Duration::from_secs(5))
                 .run()
                 .await
                 .map(|_| ())
@@ -363,16 +394,88 @@ time.sleep(300)
 
     #[tokio::test]
     async fn worker_ignoring_sigterm_is_killed_after_the_grace_period() {
-        let started = Instant::now();
-        let mut w = worker(
-            "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(300)",
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let input = json!({"pid_file": pid_file.clone()});
+        let run = tokio::spawn(async move {
+            let mut w = worker(
+                "import json,os,signal,sys,time\n\
+                 p = json.loads(sys.stdin.read())\n\
+                 signal.signal(signal.SIGTERM, signal.SIG_IGN)\n\
+                 open(p['pid_file'], 'w').write(str(os.getpid()))\n\
+                 time.sleep(60)\n",
+                Some(&input),
+                Duration::from_secs(5),
+            );
+            w.grace = Duration::from_secs(1);
+            w.run().await.map(|_| ()).map_err(|e| e.to_string())
+        });
+        let pid = grandchild_pid(&pid_file).await;
+        let error = run.await.unwrap().unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(!alive(pid), "worker {pid} survived SIGKILL escalation");
+    }
+
+    #[tokio::test]
+    async fn sigterm_is_sent_exactly_once_on_timeout_and_cancellation() {
+        // Counts SIGTERMs, then exits after a pause long enough for a
+        // duplicate signal to arrive.
+        const COUNTING: &str = "import json,signal,sys,time\n\
+             p = json.loads(sys.stdin.read())\n\
+             n = [0]\n\
+             def h(s, f):\n    n[0] += 1\n    open(p['count'], 'w').write(str(n[0]))\n\
+             signal.signal(signal.SIGTERM, h)\n\
+             open(p['ready'], 'w').write('1')\n\
+             end = time.time() + 60\n\
+             while time.time() < end and n[0] == 0: time.sleep(0.05)\n\
+             time.sleep(1.5)\n\
+             sys.exit(1)\n";
+        for cancel in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let count = dir.path().join("count");
+            let ready = dir.path().join("ready");
+            let input = json!({"count": count.clone(), "ready": ready.clone()});
+            let budget = Duration::from_secs(if cancel { 60 } else { 3 });
+            let run = tokio::spawn(async move {
+                worker(COUNTING, Some(&input), budget)
+                    .run()
+                    .await
+                    .map(|_| ())
+            });
+            grandchild_pid_or_flag(&ready).await;
+            if cancel {
+                run.abort();
+            }
+            let _ = run.await;
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            assert_eq!(
+                std::fs::read_to_string(&count).unwrap(),
+                "1",
+                "cancel={cancel}: SIGTERM must be delivered exactly once"
+            );
+        }
+    }
+
+    async fn grandchild_pid_or_flag(path: &std::path::Path) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !path.exists() {
+            assert!(Instant::now() < deadline, "worker never became ready");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn stderr_flood_is_bounded_and_keeps_the_tail() {
+        let error = worker(
+            "import sys\nfor _ in range(2000): sys.stderr.write('z' * 1000)\nsys.stderr.write('LAST')\nsys.exit(2)\n",
             None,
-            Duration::from_secs(1),
-        );
-        w.grace = Duration::from_secs(1);
-        let error = w.run().await.unwrap_err();
-        assert!(error.to_string().contains("timed out"));
-        assert!(started.elapsed() < Duration::from_secs(20));
+            Duration::from_secs(30),
+        )
+        .run()
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.ends_with("LAST"), "{}", &error[error.len() - 20..]);
     }
 
     /// The real embedded workers read their parameters from stdin. A wrong
