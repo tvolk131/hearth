@@ -139,7 +139,9 @@ final class AppModel {
     guard inventoryTasks[id] == nil, let origin = origin(forServer: id) else { return }
     inventoryTasks[id] = Task { [weak self] in
       await self?.loadHost(on: origin)
-      self?.inventoryTasks[id] = nil
+      // A settings change may have cancelled and replaced this task; keep the new handle.
+      guard let self, self.sessions[id]?.revision == origin.revision else { return }
+      self.inventoryTasks[id] = nil
     }
   }
   func refreshServers(onlyStale: Bool = false) {
@@ -603,9 +605,8 @@ final class AppModel {
         entry.id, profilePath: configuration.profilePath, serverId: server.id, identity: identity)
     } catch { throw .configuration(Self.describe(error)) }
     guard persistLedger() else {
-      ledger.recordFailure(
-        entry.id,
-        failure: .configuration("The pending request could not be saved. Nothing was sent."))
+      ledger.recordNotLaunched(
+        entry.id, reason: "The pending request could not be saved. Nothing was sent.")
       throw .configuration("The pending request could not be saved. Nothing was sent.")
     }
     let reviewedVm = reviewedMachine(retry, on: origin.serverId)
@@ -777,10 +778,8 @@ final class AppModel {
       return
     }
     guard persistLedger() else {
-      ledger.recordFailure(
-        id,
-        failure: .configuration("The pending request could not be durably saved. Nothing was sent.")
-      )
+      ledger.recordNotLaunched(
+        id, reason: "The pending request could not be durably saved. Nothing was sent.")
       return
     }
     let client = self.client
@@ -861,21 +860,29 @@ final class AppModel {
         .success, "\(server.name): \(request.summary)", acknowledgement.summary,
         serverId: server.id, identity: server.identity, global: changedRoute)
     case .failure(let failure):
-      if failure == .cancelled && sendState == .queued {
+      let cancelledInQueue = failure == .cancelled && sendState == .queued
+      if cancelledInQueue {
         ledger.recordNotLaunched(id)
       } else {
+        // The ledger also records queue-wait timeouts as not sent.
         ledger.recordFailure(id, failure: failure)
       }
-      if failure == .cancelled && sendState == .queued {
+      if cancelledInQueue || failure.provesNotSent {
         post(
           .failure, "\(server.name): Not sent",
-          refusal ?? "Cancelled before this attempt launched. The original request ID is retained.",
+          refusal
+            ?? (cancelledInQueue
+              ? "Cancelled before this attempt launched." : failure.detail)
+            + " The original request ID is retained.",
           global: true)
       } else {
+        // A retried conflict stays unacknowledged in the ledger; only a
+        // recorded rejection is final.
+        let rejected = ledger.entry(id)?.phase == .rejected
         post(
           .failure, "\(server.name): \(request.summary): \(failure.title)",
           failure.detail
-            + (failure.isDefinitiveRejection
+            + (rejected
               ? ""
               : "\nThe request ID was kept. Retry from Pending Requests to avoid a duplicate."),
           serverId: server.id, identity: server.identity, global: changedRoute)

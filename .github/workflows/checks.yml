@@ -13,8 +13,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: checks-${{ github.ref }}
-  cancel-in-progress: true
+  # Scheduled and pushed runs on main share a ref; keep them in separate groups
+  # so a merge never cancels the long nightly Proxmox job (or vice versa).
+  group: checks-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   rust-and-recovery:

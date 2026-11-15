@@ -66,6 +66,31 @@ struct ProcessRunnerTests {
         #expect(Date().timeIntervalSince(start) < 5)
     }
 
+    @Test func cancellationAfterExitKeepsFullyCollectedResponse() async throws {
+        // The background sleep holds stdout open, so the child exits well before EOF.
+        let limits = ProcessLimits(timeout: 10, drainGrace: 5)
+        let task = Task {
+            try await ChildProcessRunner().run(
+                invocation("/bin/sh", ["-c", "printf done; /bin/sleep 1 & exit 0"], limits: limits))
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        task.cancel()
+        let result = try await task.value
+        #expect(result.stdout == Data("done".utf8))
+        #expect(result.terminationStatus == 0)
+    }
+
+    @Test func cancellationAfterExitWithIncompleteOutputIsCancelled() async throws {
+        let limits = ProcessLimits(timeout: 10, drainGrace: 0.8)
+        let task = Task {
+            try await ChildProcessRunner().run(
+                invocation("/bin/sh", ["-c", "printf done; /bin/sleep 3 & exit 0"], limits: limits))
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        task.cancel()
+        await #expect(throws: ProcessRunFailure.cancelled) { try await task.value }
+    }
+
     @Test func cancellationTerminatesOnlyItsChild() async throws {
         let runner = ChildProcessRunner()
         let bystander = Task {

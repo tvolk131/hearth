@@ -36,6 +36,8 @@ struct MigrationSheet: View {
     @State private var sourceRenewRequestId = UUID()
     @State private var destinationRenewRequestId = UUID()
     @State private var failure: RpcFailure?
+    /// Background status reads keep their own error so they never hide an action's failure.
+    @State private var pollFailure: RpcFailure?
 
     private var source: ServerProfile? { model.settings.servers.first { $0.id == target.origin?.serverId } }
     private var destination: ServerProfile? { model.settings.servers.first { $0.id == destinationId } }
@@ -160,7 +162,11 @@ struct MigrationSheet: View {
                         .disabled(!sourceCurrent || !guestVerified || !removeRecovery || isWorking)
                 }
             }
-            if let failure { Text(failure.detail).foregroundStyle(.red).textSelection(.enabled) }
+            if let failure { FailureBox(title: failure.title, detail: failure.detail) }
+            if let pollFailure {
+                FailureBox(title: "Status check failed: \(pollFailure.title)",
+                           detail: pollFailure.detail + "\nStill checking automatically, less often.")
+            }
             HStack {
                 if isWorking { ProgressView().controlSize(.small); Text("Waiting for server…").foregroundStyle(.secondary) }
                 Spacer()
@@ -179,19 +185,22 @@ struct MigrationSheet: View {
         .onChange(of: targetVmId) { _, _ in sourceConfirmed = false; planRequestId = UUID() }
         .task(id: transfer.map { $0.id + "-" + $0.phase + (startSubmitted ? "-started" : "-review") }) {
             guard transfer != nil else { return }
+            var interval = 5.0
             while !Task.isCancelled, let current = transfer, !current.isTerminal, current.phase != "blocked", sourceCurrent,
                   (["preparing", "fenced", "receiving", "ready", "relinquished", "accepted", "cleaning"].contains(current.phase)
                     || (current.phase == "authorized" && startSubmitted)) {
-                do { try await Task.sleep(for: .seconds(5)); try Task.checkCancellation() } catch { return }
-                await refreshTransfer()
-                if failure != nil { return }
+                do { try await Task.sleep(for: .seconds(interval)); try Task.checkCancellation() } catch { return }
+                await refreshTransfer(polling: true)
+                // Back off after a failed read (up to a minute); reset once a read succeeds.
+                interval = pollFailure == nil ? 5 : min(interval * 2, 60)
             }
         }
         .task(id: destinationCleanupPending ? transfer?.id : nil) {
+            var interval = 5.0
             while destinationCleanupPending, sourceCurrent, destinationCurrent, !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(5)); try Task.checkCancellation() } catch { return }
-                await refreshDestinationCleanup()
-                if failure != nil { return }
+                do { try await Task.sleep(for: .seconds(interval)); try Task.checkCancellation() } catch { return }
+                await refreshDestinationCleanup(polling: true)
+                interval = pollFailure == nil ? 5 : min(interval * 2, 60)
             }
         }
     }
@@ -330,10 +339,11 @@ struct MigrationSheet: View {
     }
 
     @MainActor
-    private func refreshDestinationCleanup() async {
+    private func refreshDestinationCleanup(polling: Bool = false) async {
         guard let transfer, let proof = transfer.abortProof, let origin = destinationOrigin,
               sourceCurrent, destinationCurrent, !isWorking else { return }
-        isWorking = true; failure = nil
+        isWorking = true
+        if !polling { failure = nil }
         defer { isWorking = false }
         do throws(RpcFailure) {
             let value = try await model.queryOnRoute(.migration(.status(migrationId: transfer.id)), origin: origin,
@@ -343,7 +353,8 @@ struct MigrationSheet: View {
             }
             destinationCleanupVerified = state == .verified
             destinationCleanupPending = state == .pending
-        } catch { failure = error }
+            pollFailure = nil
+        } catch { if polling { pollFailure = error } else { failure = error } }
     }
 
     @MainActor
@@ -380,9 +391,10 @@ struct MigrationSheet: View {
     }
 
     @MainActor
-    private func refreshTransfer() async {
+    private func refreshTransfer(polling: Bool = false) async {
         guard !isWorking, let transfer, let origin = target.origin else { return }
-        isWorking = true; failure = nil
+        isWorking = true
+        if !polling { failure = nil }
         defer { isWorking = false }
         do throws(RpcFailure) {
             let value = try await model.query(.migration(.status(migrationId: transfer.id)), origin: origin, as: MigrationTransferRecord.self)
@@ -393,7 +405,8 @@ struct MigrationSheet: View {
                 destinationConfirmed = false; renewConfirmed = false
                 startSubmitted = value.destinationGrant != nil
             }
-        } catch { failure = error }
+            pollFailure = nil
+        } catch { if polling { pollFailure = error } else { failure = error } }
     }
 }
 

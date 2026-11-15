@@ -14,7 +14,8 @@ use sha2::{Digest, Sha256};
 use super::protocol::*;
 use super::shrink::{PendingShrink, ShrinkPlan, ShrinkSpec};
 
-const CATALOG: TableDefinition<u8, &[u8]> = TableDefinition::new("controller_catalog_v1");
+pub(crate) const CATALOG: TableDefinition<u8, &[u8]> =
+    TableDefinition::new("controller_catalog_v1");
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Binding {
@@ -840,26 +841,38 @@ impl Store {
             .set_durability(Durability::Immediate)
             .map_err(internal)?;
         let result;
+        let changed;
         {
             let mut table = transaction.open_table(CATALOG).map_err(internal)?;
-            let mut catalog: Catalog = {
+            let (mut catalog, stored): (Catalog, Vec<u8>) = {
                 let bytes = table
                     .get(0)
                     .map_err(internal)?
                     .ok_or_else(|| failure("internal", "catalog missing"))?;
-                serde_json::from_slice(bytes.value()).map_err(internal)?
+                let stored = bytes.value().to_vec();
+                (serde_json::from_slice(&stored).map_err(internal)?, stored)
             };
             validate_scope(&catalog).map_err(internal)?;
             result = action(&mut catalog)?;
             validate_scope(&catalog).map_err(internal)?;
-            catalog.revision = catalog
-                .revision
-                .checked_add(1)
-                .ok_or_else(|| failure("internal", "catalog revision exhausted"))?;
-            let bytes = serde_json::to_vec(&catalog).map_err(internal)?;
-            table.insert(0, bytes.as_slice()).map_err(internal)?;
+            // Reads run here too, inside the serialized write transaction, so
+            // authentication and revocation are checked against current
+            // state. Only commit (and fsync) when something actually changed.
+            changed = serde_json::to_vec(&catalog).map_err(internal)? != stored;
+            if changed {
+                catalog.revision = catalog
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| failure("internal", "catalog revision exhausted"))?;
+                let bytes = serde_json::to_vec(&catalog).map_err(internal)?;
+                table.insert(0, bytes.as_slice()).map_err(internal)?;
+            }
         }
-        transaction.commit().map_err(internal)?;
+        if changed {
+            transaction.commit().map_err(internal)?;
+        } else {
+            transaction.abort().map_err(internal)?;
+        }
         Ok(result)
     }
 

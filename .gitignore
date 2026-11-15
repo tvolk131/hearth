@@ -1,5 +1,4 @@
 /target/
-*.sqlite*
 *.lockfile
 /.lab/
 __pycache__/

@@ -12,10 +12,6 @@ const RAW_LIMIT: u64 = 256 * 1024 * 1024;
 const ROW_LIMIT: usize = 64 * 1024 * 1024;
 const REDB_MAGIC: &[u8] = b"redb\x1a\x0a\xa9\x0d\x0a";
 
-unsafe extern "C" {
-    fn geteuid() -> u32;
-}
-
 #[derive(Debug, Serialize)]
 pub struct ManagedSchemaRepairReceipt {
     pub schema: u32,
@@ -130,7 +126,7 @@ pub fn repair_managed_schema(
 ) -> Result<ManagedSchemaRepairReceipt> {
     // SAFETY: POSIX geteuid has no arguments or memory preconditions.
     ensure!(
-        unsafe { geteuid() } == 0,
+        unsafe { libc::geteuid() } == 0,
         "managed schema repair must run as root"
     );
     let config = ManagedConfig::read(managed_config)?;

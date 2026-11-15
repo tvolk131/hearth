@@ -58,9 +58,10 @@ struct PendingRequestsView: View {
               }
             }
             if current.isEmpty {
+              // Only reached when other servers still have pending requests.
               ContentUnavailableView(
-                "No pending requests", systemImage: "tray",
-                description: Text("Every submitted change has been acknowledged.")
+                "No pending requests for this server", systemImage: "tray",
+                description: Text("Other servers still have pending requests, listed below.")
               )
               .frame(maxWidth: .infinity)
             } else {
@@ -190,9 +191,13 @@ struct PendingRow: View {
         text: model.mutationSendStates[entry.id]?.rawValue ?? "Sending", color: .blue,
         systemImage: "paperplane")
     case .indeterminate:
-      Pill(
-        text: entry.attempts == 0 ? "Not sent" : "Unacknowledged", color: .orange,
-        systemImage: "questionmark.circle")
+      if entry.attempts == 0 {
+        // Nothing reached the server: calm, safe to discard.
+        Pill(text: "Not sent", color: .secondary, systemImage: "tray")
+      } else {
+        // May already have been applied.
+        Pill(text: "Unacknowledged", color: .orange, systemImage: "questionmark.circle")
+      }
     case .rejected:
       Pill(text: "Rejected", color: .red, systemImage: "xmark.octagon")
     }

@@ -4,7 +4,7 @@ The Rust controller, privileged helper, CLI and Swift app implement a two-stage
 shrink for controller-created image guests. The selected real-Proxmox workflow
 and copy-interruption test passed; see the qualification report.
 Existing physical VMs cannot be adopted or resized by this adapter.
-This qualification did not modify Heidi's VM or either Hetzner host. A later, separately authorized [November 13 one-off](persistent-management.md#heidi-ssd-shrink-november-13) shrank Heidi's SSD VM to 400 GiB; it does not expand this lab adapter's supported layouts or enable managed resize RPCs.
+This qualification did not modify Heidi's VM or either Hetzner host. A later, separately authorized [November 13 one-off](persistent-management.md) shrank Heidi's SSD VM to 400 GiB; it does not expand this lab adapter's supported layouts or enable managed resize RPCs.
 
 ## Supported layout and capacity
 

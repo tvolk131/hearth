@@ -84,6 +84,8 @@ public enum RpcFailure: Error, Hashable, Sendable {
   case configuration(String)
   case launchFailed(String)
   case timedOut(seconds: Int)
+  /// The call waited too long for the shared device queue; no process ran.
+  case queueTimedOut
   case cancelled
   case outputTooLarge
   case processFailed(status: Int32, signaled: Bool, stderr: String)
@@ -100,11 +102,15 @@ public enum RpcFailure: Error, Hashable, Sendable {
     return false
   }
 
+  /// Only failures that prove no child process was launched for this attempt.
+  public var provesNotSent: Bool { self == .queueTimedOut }
+
   public var title: String {
     switch self {
     case .configuration: "App settings need attention"
     case .launchFailed: "Could not start pve-devctl"
     case .timedOut: "pve-devctl timed out"
+    case .queueTimedOut: "Not sent"
     case .cancelled: "Cancelled"
     case .outputTooLarge: "Response too large"
     case .processFailed: "pve-devctl failed"
@@ -121,6 +127,8 @@ public enum RpcFailure: Error, Hashable, Sendable {
       message
     case .timedOut(let seconds):
       "No response within \(seconds) seconds. The child process was terminated."
+    case .queueTimedOut:
+      "Waited too long behind another request to this server; nothing was sent."
     case .cancelled:
       "The request was cancelled."
     case .outputTooLarge:

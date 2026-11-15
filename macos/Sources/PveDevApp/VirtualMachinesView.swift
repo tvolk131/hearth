@@ -164,7 +164,7 @@ struct LegacyVirtualMachinesView: View {
           } label: {
             Label("Shut Down", systemImage: "power")
           }
-          .help("Shut down the guest cleanly before shrinking its disk")
+          .help("Ask the guest OS to shut down cleanly. Unlike Stop, this never forces the VM off.")
         }
         if available.contains(.start) {
           Button {
@@ -174,6 +174,7 @@ struct LegacyVirtualMachinesView: View {
           } label: {
             Label("Start", systemImage: "play.fill")
           }
+          .help("Start this VM")
         }
         if available.contains(.stop) {
           Button {
@@ -181,6 +182,7 @@ struct LegacyVirtualMachinesView: View {
           } label: {
             Label("Stop", systemImage: "stop.fill")
           }
+          .help("Force the VM off immediately, like pulling the power. Running work is interrupted.")
         }
         if available.contains(.delete)
           && !(model.dashboard?.diskShrinks.contains { $0.owner == vm.owner } ?? false)
@@ -190,6 +192,7 @@ struct LegacyVirtualMachinesView: View {
           } label: {
             Label("Delete", systemImage: "trash")
           }
+          .help("Permanently delete this VM and its disks")
         }
         if permissions.isAdmin && !model.isReadOnly && vm.state == .stopped {
           let ownerHasRecovery =

@@ -103,6 +103,7 @@ private final class ChildSession: @unchecked Sendable {
     private var exited = false
     private var finished = false
     private var cancelled = false
+    private var cancelledBeforeExit = false
     private var timedOut = false
     private var stdoutOverflow = false
     private var stderrOverflow = false
@@ -130,6 +131,8 @@ private final class ChildSession: @unchecked Sendable {
     func cancel() {
         lock.withLock {
             cancelled = true
+            // Cancellation after the child exited cannot have interrupted it.
+            if !exited { cancelledBeforeExit = true }
             requestTerminationLocked()
         }
         finishIfPossible()
@@ -295,7 +298,8 @@ private final class ChildSession: @unchecked Sendable {
             process?.terminationHandler = nil
             process = nil
             let result: Result<ProcessResult, ProcessRunFailure>
-            if cancelled {
+            // A late cancellation keeps a real response only when all output was collected.
+            if cancelledBeforeExit || (cancelled && !(stdoutEOF && stderrEOF)) {
                 result = .failure(.cancelled)
             } else if timedOut {
                 result = .failure(.timedOut)

@@ -90,13 +90,14 @@ public struct RpcClient: Sendable {
     await onState?(.queued)
     guard await queue.acquire(UUID(), priority: request.isMutation, timeout: readBudget) else {
       if Task.isCancelled { throw .cancelled }
-      throw .timedOut(seconds: Int(readBudget ?? configuration.limits.timeout))
+      // No child ran: this is a queue wait, not a process timeout.
+      throw .queueTimedOut
     }
     if let readBudget {
       let remaining = readBudget - (ProcessInfo.processInfo.systemUptime - started)
       guard remaining > 0 else {
         await queue.release()
-        throw .timedOut(seconds: Int(readBudget))
+        throw .queueTimedOut
       }
       invocation.limits.timeout = remaining
     }

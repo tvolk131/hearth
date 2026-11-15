@@ -125,12 +125,10 @@ impl Lab {
             .into()
     }
     async fn crash(&self, host: &Host, id: &str, step: Step) {
-        self.edit(|w| {
-            w.faults = vec![Fault {
-                step,
-                point: FaultPoint::AfterEffect,
-            }]
-        });
+        self.crash_at(host, id, step, FaultPoint::AfterEffect).await
+    }
+    async fn crash_at(&self, host: &Host, id: &str, step: Step, point: FaultPoint) {
+        self.edit(|w| w.faults = vec![Fault { step, point }]);
         let job = self.store.read().unwrap().operations[id].job.clone();
         host.submit(job).unwrap();
         assert!(host.run_pending().await.is_err());
@@ -366,4 +364,37 @@ async fn planned_continuation_refuses_a_missing_historical_resize_receipt() {
             .contains("historical resize receipt")
     );
     assert!(lab.store.read().unwrap().disk_growths.contains_key(&9001));
+}
+
+#[tokio::test]
+async fn crash_after_recovery_commit_does_not_reblock_the_original() {
+    // The recovery decision is durable once its step record commits. A crash
+    // before the recovery job itself is marked complete must not leave it
+    // counted as unsettled work that re-blocks the original it just resolved.
+    let (lab, host) = Lab::new().await;
+    let accepted = lab.send(
+        json!({"action":"grow_vm","request_id":"resize","vm_id":9001,"expected_disk_mib":4096,
+        "target_disk_mib":6144,"confirm_downtime":true}),
+    );
+    let id = accepted["operation_id"].as_str().unwrap().to_owned();
+    lab.crash(&host, &id, Step::GrowVolume).await;
+    let host = lab.reopen_blocked(host, &id).await;
+    let recovery = lab
+        .recovery(&host, &id, "recovery", RecoveryKind::ResumeVerifiedEffect)
+        .await;
+    lab.crash_at(&host, &recovery, Step::Recover, FaultPoint::AfterReceipt)
+        .await;
+    drop(host);
+    let host = lab.open().await;
+    host.run_pending().await.unwrap();
+    let journal = host.journal().unwrap();
+    assert_eq!(journal.jobs[&recovery].status, OperationStatus::Verified);
+    assert_eq!(
+        journal.jobs[&id].status,
+        OperationStatus::Verified,
+        "original was re-blocked: {:?}",
+        journal.jobs[&id].error
+    );
+    lab.sync(&host, &recovery);
+    lab.sync(&host, &id);
 }

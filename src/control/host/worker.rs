@@ -133,8 +133,27 @@ impl Worker<'_> {
             // its input; the exit status below is what matters.
             let _ = writer.await;
         }
-        let bytes = output.await??;
-        let detail = errors.await??;
+        // The worker has exited, but a stray descendant that inherited its
+        // pipes could keep them open indefinitely. Bound the drain so the
+        // helper's single executor is never held by an orphan.
+        let (mut output, mut errors) = (output, errors);
+        let drained = timeout(self.grace, async {
+            let bytes = (&mut output).await??;
+            let detail = (&mut errors).await??;
+            Result::<_>::Ok((bytes, detail))
+        })
+        .await;
+        let (bytes, detail) = match drained {
+            Ok(result) => result?,
+            Err(_) => {
+                output.abort();
+                errors.abort();
+                bail!(
+                    "{} exited ({status}) but its output stayed open; a leftover child process may still be running",
+                    self.label
+                );
+            }
+        };
         ensure!(
             status.success(),
             "{} failed: {}",
@@ -340,6 +359,26 @@ time.sleep(60)
         assert!(error.starts_with("test worker failed: "));
         assert!(error.ends_with("END"));
         assert!(error.len() < 2600);
+    }
+
+    #[tokio::test]
+    async fn orphan_holding_stdout_cannot_hold_the_executor() {
+        // The worker exits immediately, leaving a detached child that still
+        // has the worker's stdout open.
+        let script = r#"
+import subprocess, sys
+child = subprocess.Popen(["sleep", "30"], start_new_session=True, stdout=sys.stdout)
+print(child.pid, flush=True)
+"#;
+        let mut quick = worker(script, None, Duration::from_secs(60));
+        quick.grace = Duration::from_secs(1);
+        let started = Instant::now();
+        let error = quick.run().await.unwrap_err().to_string();
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "drain was not bounded"
+        );
+        assert!(error.contains("output stayed open"), "{error}");
     }
 
     #[tokio::test]

@@ -86,7 +86,7 @@ struct RpcQueueTests {
     do {
       _ = try await client.execute(.dashboard, configuration: short)
       Issue.record("Queued read exceeded its deadline")
-    } catch { #expect(error as? RpcFailure == .timedOut(seconds: 0)) }
+    } catch { #expect(error as? RpcFailure == .queueTimedOut) }
     #expect(await runner.calls == ["active"])
     let next = Task { try await client.execute(.dashboard, configuration: config("next")) }
     await runner.finish("active")
