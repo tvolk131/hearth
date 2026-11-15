@@ -82,6 +82,42 @@ enum Command {
         #[command(flatten)]
         expected: Expected,
     },
+    /// Produce new quarantined state with raised compute ceilings; never modifies live state or activates workers.
+    ExpandCompute {
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        expected_bundle: String,
+        #[arg(long)]
+        managed_config: PathBuf,
+        #[arg(long)]
+        expected_config_sha256: String,
+        #[command(flatten)]
+        expected: Expected,
+    },
+    /// Produce new quarantined state reconciling a verified offline shrink; never activates workers or changes disks.
+    OfflineShrinkReconcile {
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        expected_bundle: String,
+        #[arg(long)]
+        managed_config: PathBuf,
+        #[arg(long)]
+        expected_config_sha256: String,
+        #[command(flatten)]
+        expected: Expected,
+        #[arg(long)]
+        vm_id: u16,
+        #[arg(long)]
+        expected_disk_mib: u64,
+        #[arg(long)]
+        target_disk_mib: u64,
+    },
 }
 
 fn run() -> Result<()> {
@@ -127,6 +163,42 @@ fn run() -> Result<()> {
             expected_bundle,
             expected,
         } => maintenance::restore(&bundle, &output, &expected.pins(), &expected_bundle)?,
+        Command::ExpandCompute {
+            bundle,
+            output,
+            expected_bundle,
+            managed_config,
+            expected_config_sha256,
+            expected,
+        } => maintenance::prepare_compute_expansion(
+            &bundle,
+            &output,
+            &expected.pins(),
+            &expected_bundle,
+            &managed_config,
+            &expected_config_sha256,
+        )?,
+        Command::OfflineShrinkReconcile {
+            bundle,
+            output,
+            expected_bundle,
+            managed_config,
+            expected_config_sha256,
+            expected,
+            vm_id,
+            expected_disk_mib,
+            target_disk_mib,
+        } => maintenance::prepare_offline_adopted_shrink(
+            &bundle,
+            &output,
+            &expected.pins(),
+            &expected_bundle,
+            &managed_config,
+            &expected_config_sha256,
+            vm_id,
+            expected_disk_mib,
+            target_disk_mib,
+        )?,
     };
     println!("{}", serde_json::to_string_pretty(&receipt)?);
     Ok(())

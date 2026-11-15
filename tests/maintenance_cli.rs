@@ -134,3 +134,87 @@ fn unknown_force_actions_and_invalid_root_selectors_are_rejected_by_the_parser()
         assert!(output.stdout.is_empty());
     }
 }
+
+fn ops(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_pve-dev-ops"))
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn offline_quarantine_preparation_is_a_pve_dev_ops_subcommand() {
+    for (subcommand, expected) in [
+        ("expand-compute", "--expected-config-sha256"),
+        ("offline-shrink-reconcile", "--target-disk-mib"),
+    ] {
+        let output = ops(&[subcommand, "--help"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains(expected));
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let missing = root.path().join("missing-bundle");
+    let output_dir = root.path().join("quarantine");
+    let common = [
+        "--bundle",
+        missing.to_str().unwrap(),
+        "--output",
+        output_dir.to_str().unwrap(),
+        "--expected-bundle",
+        "0",
+        "--managed-config",
+        "/missing-config.json",
+        "--expected-config-sha256",
+        "0",
+        "--expected-environment",
+        "lab",
+        "--expected-server",
+        "server",
+        "--expected-pool-guid",
+        "1",
+    ];
+    let shrink = [
+        "--vm-id",
+        "9001",
+        "--expected-disk-mib",
+        "8192",
+        "--target-disk-mib",
+        "4096",
+    ];
+    for args in [
+        [&["expand-compute"][..], &common].concat(),
+        [&["offline-shrink-reconcile"][..], &common, &shrink].concat(),
+    ] {
+        let output = ops(&args);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(!output_dir.exists());
+    }
+
+    // Shrink parameters stay mandatory and typed.
+    for args in [
+        [&["offline-shrink-reconcile"][..], &common].concat(),
+        [
+            &["offline-shrink-reconcile"][..],
+            &common,
+            &[
+                "--vm-id",
+                "70000",
+                "--expected-disk-mib",
+                "8192",
+                "--target-disk-mib",
+                "4096",
+            ],
+        ]
+        .concat(),
+    ] {
+        let output = ops(&args);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+    }
+}
