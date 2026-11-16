@@ -32,7 +32,7 @@ struct PveDevApplication: App {
             model.fleetPageActive
               ? model.fleetIsRefreshing : (!model.isConfigured || model.isRefreshing))
         Toggle(
-          "Auto-refresh (fleet pages or selected server) Every \(model.settings.clampedPollingInterval)s",
+          "Auto-refresh \(model.selectedServer?.name ?? "Selected Server") Every \(model.settings.clampedPollingInterval)s",
           isOn: Binding(get: { model.settings.pollingEnabled }, set: { model.setPolling($0) })
         )
         .disabled(!model.isConfigured)

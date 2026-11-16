@@ -58,6 +58,9 @@ struct StatusStrip: View {
               ? "\nShowing the previous observation; its capture time is unchanged."
               : "\nShowing the previous dashboard."))
       }
+      if !global, let id = model.selectedServerId {
+        AutoRefreshPausedBanner(serverId: id)
+      }
       if !model.isReadOnly, let issue = model.ledgerStorageIssue {
         FailureBox(
           title: "Pending request storage", detail: issue,

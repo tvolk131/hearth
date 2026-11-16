@@ -37,6 +37,19 @@ struct FleetReviewTests {
     #expect(rows[0].confirmationRequired(for: .delete) != "dev-heidi")
     #expect(rows[0].confirmationRequired(for: .delete) != rows[1].qualifiedName)
   }
+  @Test func startSkipsReviewOnlyWhenNoSameNamedCopyIsRunning() {
+    let a = ServerProfile(name: "HDD", profilePath: "/a")
+    let b = ServerProfile(name: "SSD", profilePath: "/b")
+    let alone = FleetVm.build(servers: [a], dashboards: [a.id: dashboard(.stopped)])[0]
+    #expect(alone.sendsWithoutReview(.start))
+    for kind in [VmActionKind.stop, .shutdown, .delete] {
+      #expect(!alone.sendsWithoutReview(kind))
+    }
+    let shadowed = FleetVm.build(
+      servers: [a, b], dashboards: [a.id: dashboard(.stopped), b.id: dashboard(.running)])
+      .first { $0.serverId == a.id }!
+    #expect(!shadowed.sendsWithoutReview(.start))
+  }
   @Test func singleIecFormatterCoversBytesAndLargeVolumes() {
     #expect(Formatting.bytes(0) == "0 B")
     #expect(Formatting.bytes(1024) == "1 KiB")

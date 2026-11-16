@@ -14,9 +14,9 @@ enum SidebarItem: Hashable {
 struct RootView: View {
   @Environment(AppModel.self) private var model
   @State private var selection: SidebarItem? = .overview
-  @State private var showVerified = true
+  @State private var showCompleted = true
   @State private var showDeleted = false
-  @State private var showEnrollVm = false
+  @State private var enrollOrigin: MutationOrigin?
   @State private var createOrigin: MutationOrigin?
 
   var body: some View {
@@ -31,8 +31,9 @@ struct RootView: View {
           selection = .overview
         }
       }
-      .onChange(of: model.requestOrigin) { _, _ in
-        showEnrollVm = false
+      .onChange(of: model.requestOrigin) { _, origin in
+        // Enrollment reviews against the selected server; a different selection closes it.
+        if enrollOrigin != nil && enrollOrigin != origin { enrollOrigin = nil }
       }
       .onChange(of: model.isReadOnly) { _, readOnly in
         if readOnly, selection != .overview && selection != .machines { selection = .overview }
@@ -43,28 +44,30 @@ struct RootView: View {
     splitView
       .toolbar {
         MainToolbar(
-          selection: selection ?? .overview, showVerified: $showVerified,
-          showDeleted: $showDeleted, showEnrollVm: $showEnrollVm,
+          selection: selection ?? .overview, showCompleted: $showCompleted,
+          showDeleted: $showDeleted,
           createOnServer: { id in
             createOrigin = model.origin(forServer: id)
+          },
+          enrollOnServer: { id in
+            model.selectServer(id)
+            enrollOrigin = model.origin(forServer: id)
           })
       }
       .sheet(item: $createOrigin) { origin in CreateVmSheet(origin: origin) }
+      .sheet(item: $enrollOrigin) { origin in EnrollmentSheet(origin: origin) }
       .onChange(of: selection) { _, page in
         model.fleetPageActive = page == .overview || page == .machines
       }
       .onAppear { model.fleetPageActive = selection == .overview || selection == .machines }
   }
 
+  private var isFleetPage: Bool { selection == .overview || selection == .machines }
   private var scopedViewIdentity: MutationOrigin? {
-    if selection == .overview || (selection == .machines && !model.usesLegacyMachines) {
-      return nil
-    }
-    return model.requestOrigin
+    isFleetPage ? nil : model.requestOrigin
   }
   private var pageSubtitle: String {
-    if selection == .overview || (selection == .machines && !model.usesLegacyMachines) { return "" }
-    return model.selectedServer?.name ?? ""
+    isFleetPage ? "" : model.selectedServer?.name ?? ""
   }
 
   private var splitView: some View {
@@ -125,10 +128,7 @@ struct RootView: View {
     }
     .navigationSplitViewColumnWidth(min: 200, ideal: 220)
     .safeAreaInset(edge: .top) {
-      if !model.settings.servers.isEmpty
-        && (model.isReadOnly || model.usesLegacyMachines
-          || (selection != .overview && selection != .machines))
-      {
+      if !model.settings.servers.isEmpty && (model.isReadOnly || !isFleetPage) {
         Picker(
           "Server",
           selection: Binding(
@@ -164,16 +164,8 @@ struct RootView: View {
     } else {
       switch selection ?? .overview {
       case .overview: ServersView()
-      case .machines:
-        if model.dashboard?.backend == .managed || model.dashboard == nil {
-          FleetVirtualMachinesView(showDeleted: $showDeleted)
-        } else {
-          LegacyVirtualMachinesView(
-            showDeleted: $showDeleted, showEnroll: $showEnrollVm,
-            origin: model.requestOrigin
-          ).id(model.requestOrigin)
-        }
-      case .operations: OperationsView(showVerified: $showVerified)
+      case .machines: FleetVirtualMachinesView(showDeleted: $showDeleted)
+      case .operations: OperationsView(showCompleted: $showCompleted)
       case .transfers: MigrationTransfersView()
       case .pending: PendingRequestsView()
       case .users: AdminUsersView(origin: model.requestOrigin)
@@ -186,6 +178,7 @@ struct RootView: View {
     model.isReadOnly
       || (!model.fleetPageActive && model.refreshFailure != nil
         && (model.dashboard != nil || model.observation != nil))
+      || (!model.fleetPageActive && model.selectedServerId.map(model.autoRefreshPaused) == true)
       || model.ledgerStorageIssue != nil
       || (model.fleetPageActive ? model.ledger.entries : model.pendingForCurrentProfile).contains {
         $0.phase != .rejected && !$0.isInFlight
@@ -241,15 +234,15 @@ struct IdentityFooter: View {
 struct MainToolbar: ToolbarContent {
   @Environment(AppModel.self) private var model
   let selection: SidebarItem
-  @Binding var showVerified: Bool
+  @Binding var showCompleted: Bool
   @Binding var showDeleted: Bool
-  @Binding var showEnrollVm: Bool
   let createOnServer: (UUID) -> Void
+  let enrollOnServer: (UUID) -> Void
 
   var body: some ToolbarContent {
     ToolbarItemGroup(placement: .primaryAction) {
       if !model.isReadOnly && selection == .operations {
-        Toggle("Show Verified", isOn: $showVerified)
+        Toggle("Show Completed", isOn: $showCompleted)
           .toggleStyle(.checkbox)
           .fixedSize()
           .padding(.leading, 12)
@@ -261,25 +254,40 @@ struct MainToolbar: ToolbarContent {
           .fixedSize()
           .padding(.leading, 12)
           .padding(.trailing, 14)
-        if model.permissions.isAdmin && model.dashboard?.supports("plan_vm_enrollment") == true
-          && model.dashboard?.supports("enroll_vm") == true
-        {
-          Button {
-            showEnrollVm = true
+        if model.fleetServers.contains(where: { model.enrollVmIssue(forServer: $0.id) == nil }) {
+          Menu {
+            ForEach(model.fleetServers) { server in
+              let issue = model.enrollVmIssue(forServer: server.id)
+              Button {
+                enrollOnServer(server.id)
+              } label: {
+                Text(server.name)
+                if let issue { Text(issue) }
+              }
+              .disabled(issue != nil)
+              .help(issue ?? "Review and enroll an existing VM permitted by \(server.name)")
+            }
           } label: {
             Label("Enroll VM…", systemImage: "tray.and.arrow.down")
           }
-          .help("Review and enroll an existing VM permitted by this server")
+          .help("Choose the server whose existing VM to review and enroll")
         }
         Menu {
-          ForEach(model.settings.servers.filter { !$0.isReadOnly }) { server in
-            Button(server.name) { createOnServer(server.id) }
-              .disabled(model.dashboard(forServer: server.id)?.canCreateManagedVm != true)
+          ForEach(model.fleetServers) { server in
+            let issue = model.createVmIssue(forServer: server.id)
+            Button {
+              createOnServer(server.id)
+            } label: {
+              Text(server.name)
+              if let issue { Text(issue) }
+            }
+            .disabled(issue != nil)
+            .help(issue ?? "Create a VM on \(server.name)")
           }
         } label: {
           Label("New VM", systemImage: "plus")
         }
-        .help("Choose a physical server for the new VM")
+        .help("Choose a server for the new VM. Unavailable servers explain why.")
       }
       RefreshButton(
         fleet: selection == .machines || selection == .overview, inventory: selection == .overview)
