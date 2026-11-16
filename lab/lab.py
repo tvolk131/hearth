@@ -23,6 +23,9 @@ INPUTS = json.loads((ROOT / "lab/inputs.json").read_text())
 MIN_FREE = int(os.environ.get("PVE_LAB_MIN_FREE_GIB", "10")) * 1024**3
 if MIN_FREE < 3 * 1024**3:
     raise RuntimeError("Lab safety floor cannot be less than 3 GiB")
+ACCELERATORS = ("auto", "kvm", "tcg")
+KVM_GET_API_VERSION = 0xAE00
+KVM_API_VERSION = 12
 
 
 def run(arguments, **options):
@@ -48,6 +51,47 @@ def space():
     free = shutil.disk_usage(HOME).free
     if free < MIN_FREE:
         raise RuntimeError(f"Only {free / 1024**3:.1f} GiB free; lab requires a {MIN_FREE / 1024**3:g} GiB safety floor")
+
+
+def kvm_usable():
+    try:
+        descriptor = os.open("/dev/kvm", os.O_RDWR | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return False, "/dev/kvm does not exist"
+    except OSError as error:
+        return False, f"/dev/kvm is not usable: {error.strerror}"
+    try:
+        version = fcntl.ioctl(descriptor, KVM_GET_API_VERSION)
+    except OSError as error:
+        return False, f"/dev/kvm rejected KVM_GET_API_VERSION: {error.strerror}"
+    finally:
+        os.close(descriptor)
+    if version != KVM_API_VERSION:
+        return False, f"/dev/kvm reports unsupported API version {version}"
+    return True, "/dev/kvm is usable"
+
+
+def choose_emulation(threading):
+    """Outer accelerator: KVM when /dev/kvm is usable, otherwise TCG.
+
+    PVE_LAB_ACCEL=tcg forces software emulation; PVE_LAB_ACCEL=kvm refuses to
+    fall back, so a runner that silently lost KVM fails fast instead of
+    spending hours under TCG.
+    """
+    wanted = os.environ.get("PVE_LAB_ACCEL", "auto")
+    if wanted not in ACCELERATORS:
+        raise RuntimeError(f"PVE_LAB_ACCEL must be one of {', '.join(ACCELERATORS)}, not {wanted!r}")
+    if threading not in ("single", "multi"):
+        raise ValueError("invalid TCG threading mode")
+    if wanted == "tcg":
+        usable, reason = False, "forced by PVE_LAB_ACCEL=tcg"
+    else:
+        usable, reason = kvm_usable()
+        if wanted == "kvm" and not usable:
+            raise RuntimeError(f"PVE_LAB_ACCEL=kvm but {reason}")
+    if usable:
+        return {"accelerator": "kvm", "cpu": "host", "threading": None, "reason": reason}
+    return {"accelerator": "tcg", "cpu": "max", "threading": threading, "reason": reason}
 
 
 def download():
@@ -112,9 +156,13 @@ WantedBy=multi-user.target
     }
     (directory / "user-data").write_text("#cloud-config\n" + json.dumps(config))
     (directory / "meta-data").write_text(json.dumps({"instance-id": nonce, "local-hostname": "pve-lab"}))
+    # A sealed base has no SSH keys and cloud-init disabled; its boot hook
+    # (lab/seal.sh) installs this run's identity from these plain files.
     run(["xorriso", "-as", "mkisofs", "-quiet", "-output", str(directory / "seed.iso"),
-         "-volid", "cidata", "-joliet", "-rock", str(directory / "user-data"),
-         str(directory / "meta-data")])
+         "-volid", "cidata", "-joliet", "-rock", "-graft-points",
+         f"user-data={directory / 'user-data'}", f"meta-data={directory / 'meta-data'}",
+         f"lab-host-key={keys / 'host'}", f"lab-host-key.pub={keys / 'host.pub'}",
+         f"lab-authorized-keys={keys / 'controller.pub'}"])
 
 
 def ssh_arguments(directory):
@@ -160,7 +208,7 @@ def qmp(directory, command):
 
 
 @contextlib.contextmanager
-def boot(directory, nonce, data_disks=False, control_port=False):
+def boot(directory, nonce, data_disks=False, control_port=False, emulation=None):
     space()
     socket_directory = tempfile.TemporaryDirectory(prefix="pve-dev-qmp-", dir="/tmp")
     socket_path = pathlib.Path(socket_directory.name) / "qmp.sock"
@@ -178,9 +226,12 @@ def boot(directory, nonce, data_disks=False, control_port=False):
             endpoint["control_udp_port"] = reservation.getsockname()[1]
         network += f",hostfwd=udp:127.0.0.1:{endpoint['control_udp_port']}-:7777"
     atomic_json(directory / "endpoint.json", endpoint)
-    threading = "multi" if control_port else "single"
+    emulation = emulation or choose_emulation("multi" if control_port else "single")
+    accelerator = "kvm" if emulation["accelerator"] == "kvm" else f"tcg,thread={emulation['threading']}"
+    atomic_json(directory / "emulation.json", emulation)
+    print(f"Outer QEMU accelerator: {accelerator}, CPU {emulation['cpu']} ({emulation['reason']})", flush=True)
     command = ["qemu-system-x86_64", "-name", "pve-dev-disposable-lab", "-machine", "q35",
-               "-accel", f"tcg,thread={threading}", "-cpu", "max", "-smp", "4", "-m", "4096",
+               "-accel", accelerator, "-cpu", emulation["cpu"], "-smp", "4", "-m", "4096",
                "-display", "none", "-monitor", "none", "-serial", f"file:{directory / 'serial.log'}",
                "-qmp", f"unix:{socket_path},server=on,wait=off",
                "-drive", f"file={directory / 'root.qcow2'},format=qcow2,if=none,id=rootdisk,discard=unmap",
@@ -260,17 +311,27 @@ def ready(directory, process, timeout, installing=False):
     raise TimeoutError(f"Proxmox not ready after {timeout}s; see {directory}")
 
 
+def seal_digest():
+    return hashlib.sha256((ROOT / "lab/seal.sh").read_bytes()).hexdigest()
+
+
 def build(timeout):
     directory = HOME / "base"
     directory.mkdir(mode=0o700, exist_ok=True)
     directory.chmod(0o700)
     inputs = hashlib.sha256((ROOT / "lab/inputs.json").read_bytes() + (ROOT / "lab/bootstrap.sh").read_bytes()).hexdigest()
+    seal = seal_digest()
     stamp = directory / "build.json"
     if stamp.exists():
-        if json.loads(stamp.read_text())["inputs_digest"] != inputs:
+        info = json.loads(stamp.read_text())
+        if info["inputs_digest"] != inputs:
             raise RuntimeError("Base inputs changed; preserve or remove .lab/base explicitly before rebuilding")
-        verify_image(HOME / "debian.qcow2")
-        print(f"Using existing locally built base: {directory}", flush=True)
+        if "seal_sha256" not in info:
+            print("Base predates sealing: it still holds this machine's lab SSH keys; never share or cache it", flush=True)
+        elif info["seal_sha256"] != seal:
+            raise RuntimeError("Base seal script changed; preserve or remove .lab/base explicitly before rebuilding")
+        download()
+        print(f"Using existing base: {directory}", flush=True)
         return
     nonce_file = directory / "nonce"
     if not nonce_file.exists():
@@ -281,18 +342,22 @@ def build(timeout):
     if not root.exists():
         run(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", str(source), str(root), "16G"])
     seed(directory, nonce)
+    emulation = choose_emulation("single")
     started = time.monotonic()
-    with boot(directory, nonce) as process:
+    with boot(directory, nonce, emulation=emulation) as process:
         version = ready(directory, process, timeout, installing=True)
         result = ssh(directory, "pveversion --verbose; dpkg-query -W", capture_output=True, text=True, timeout=120)
         result.check_returncode()
         (directory / "packages.txt").write_text(result.stdout)
+        sealed = ssh(directory, "bash -s", input=(ROOT / "lab/seal.sh").read_text(), capture_output=True, text=True, timeout=300)
+        if sealed.returncode:
+            raise RuntimeError(f"Sealing the base failed: {sealed.stdout}{sealed.stderr}")
     if process.returncode != 0:
         raise RuntimeError("Base did not shut down cleanly; refusing to seal it")
     run(["qemu-img", "check", str(root)])
-    atomic_json(stamp, {"schema": 1, "inputs_digest": inputs, "proxmox": version,
+    atomic_json(stamp, {"schema": 1, "inputs_digest": inputs, "seal_sha256": seal, "proxmox": version,
                         "build_seconds": round(time.monotonic() - started, 1),
-                        "debian": INPUTS, "nonce": nonce})
+                        "emulation": emulation, "debian": INPUTS, "nonce": nonce})
     print(f"Base built and shut down: {stamp}", flush=True)
 
 
@@ -305,7 +370,10 @@ def main():
     parser.add_argument("command", choices=["build", "control-test", "guest-test"])
     parser.add_argument("--timeout", type=int, default=5400)
     parser.add_argument("--linux-bin-dir", type=pathlib.Path, help="Directory containing Linux pve-devd and pve-dev-host binaries for control-test")
+    parser.add_argument("--accel", choices=ACCELERATORS, default=os.environ.get("PVE_LAB_ACCEL", "auto"),
+                        help="Outer QEMU accelerator: auto (KVM if /dev/kvm is usable, else TCG), kvm (no fallback) or tcg (force); default $PVE_LAB_ACCEL or auto")
     arguments = parser.parse_args()
+    os.environ["PVE_LAB_ACCEL"] = arguments.accel
     HOME.mkdir(mode=0o700, exist_ok=True)
     HOME.chmod(0o700)
     with (HOME / "lab.lock").open("a") as lock:
