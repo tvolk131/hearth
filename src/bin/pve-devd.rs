@@ -107,7 +107,7 @@ async fn worker(store: Arc<Store>, config: ServerConfig, binding: host::HostBind
                         // Transport and other untyped failures say nothing about
                         // the job; keep it queued and resubmit.
                         Ok(false) => eprintln!(
-                            "host helper unavailable for {}: {error:#}",
+                            "submitting {} failed; left as it was: {error:#}",
                             record.public.operation_id
                         ),
                         Err(refused) => eprintln!(

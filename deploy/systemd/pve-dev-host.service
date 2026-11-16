@@ -17,8 +17,11 @@ UMask=0077
 ExecStart=/usr/local/libexec/pve-dev/pve-dev-host serve --state-dir /var/lib/pve-dev-host --socket /run/pve-dev-host/host.sock --lab-config /etc/pve-dev-host/lab.json
 Restart=on-failure
 RestartSec=5s
-TimeoutStopSec=120s
-KillMode=control-group
+# The helper drains for up to 15 minutes (SHUTDOWN_GRACE) on SIGTERM. Only
+# the main process gets SIGTERM, so the step's own pvesh/zfs child finishes;
+# anything left is killed after the timeout.
+TimeoutStopSec=960s
+KillMode=mixed
 RuntimeDirectory=pve-dev-host
 RuntimeDirectoryMode=0750
 StateDirectory=pve-dev-host

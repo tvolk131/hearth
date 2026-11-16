@@ -266,6 +266,18 @@ impl Host {
     }
     pub(super) async fn handle_migration(&self, request: HostMigrationRequest) -> Result<Value> {
         let _execution = self.execution.lock().await;
+        // A stopping helper finishes the effect in flight (shutdown waits for
+        // this lock) but starts no new one; the caller retries after restart.
+        if self.stopping()
+            && !matches!(
+                request,
+                HostMigrationRequest::InspectVm { .. }
+                    | HostMigrationRequest::Inspect { .. }
+                    | HostMigrationRequest::ReadChunk { .. }
+            )
+        {
+            return Err(retryable(ShuttingDown));
+        }
         let hot = match &request {
             HostMigrationRequest::ReadChunk {
                 migration_id, slot, ..

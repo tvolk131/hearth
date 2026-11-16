@@ -6209,9 +6209,10 @@ pub async fn serve(host: Arc<Host>, socket: &Path) -> Result<()> {
 
 /// Serve until the first message on `signals` (SIGTERM/SIGINT in the
 /// binary), then stop starting new steps and wait up to `grace` for the step
-/// in flight to finish. A second message exits immediately. Connections keep
-/// being served while draining, so status reads and durable submissions
-/// still work; accepted jobs resume on the next start.
+/// or migration effect in flight to finish. A second message exits
+/// immediately. Connections keep being served while draining, so status reads
+/// and durable submissions still work, but new migration effects are refused;
+/// accepted jobs resume on the next start.
 pub async fn serve_until(
     host: Arc<Host>,
     socket: &Path,
@@ -6247,9 +6248,16 @@ pub async fn serve_until(
         grace.as_secs()
     );
     host.request_shutdown();
+    // The worker's step and any migration effect both run under `execution`;
+    // holding it means no effect is in flight. New migration effects are
+    // refused once stopping, so this lock cannot be starved.
+    let drained = async {
+        (&mut work).await;
+        let _idle = host.execution.lock().await;
+    };
     tokio::select! {
-        _ = &mut work => {
-            eprintln!("pve-dev-host stopped after its in-flight step");
+        _ = drained => {
+            eprintln!("pve-dev-host stopped with no step or migration effect in flight");
             Ok(())
         }
         _ = sleep(grace) => {

@@ -16,9 +16,11 @@ use super::{
 };
 
 impl Store {
-    /// Handle a failed submission of `operation_id`. A typed helper rejection
-    /// ends the operation (`Ok(true)`); any other error, including every
-    /// transport failure, leaves it queued for resubmission (`Ok(false)`).
+    /// Handle a failed submission of `operation_id`. `Ok(true)` means a typed
+    /// helper rejection ended the queued operation. Any other error, including
+    /// every transport failure, leaves it queued for resubmission, and a
+    /// rejection of an operation that is no longer queued changes nothing;
+    /// both return `Ok(false)`.
     pub fn settle_submit_error(
         &self,
         operation_id: &str,
@@ -26,16 +28,16 @@ impl Store {
     ) -> Result<bool, ApiError> {
         match HelperError::find(error) {
             Some(typed) if typed.code == HelperErrorCode::Rejected => {
-                self.reject(operation_id, &typed.message)?;
-                Ok(true)
+                self.reject(operation_id, &typed.message)
             }
             _ => Ok(false),
         }
     }
 
     /// Mark a queued operation `Failed` with the helper's reason and release
-    /// its admission claims. Settled operations are left unchanged.
-    pub fn reject(&self, operation_id: &str, reason: &str) -> Result<(), ApiError> {
+    /// its admission claims. Returns whether it did; operations that are no
+    /// longer queued are left unchanged.
+    pub fn reject(&self, operation_id: &str, reason: &str) -> Result<bool, ApiError> {
         self.change(|catalog| {
             let record = catalog
                 .operations
@@ -43,7 +45,7 @@ impl Store {
                 .ok_or_else(|| failure("internal", "operation missing"))?;
             // Only work the helper has never reported on can be rejected.
             if record.public.status != OperationStatus::Queued {
-                return Ok(());
+                return Ok(false);
             }
             record.public.status = OperationStatus::Failed;
             record.public.step = "rejected_by_helper".into();
@@ -118,7 +120,7 @@ impl Store {
                 "operation_id": operation_id,
                 "reason": reason,
             }));
-            Ok(())
+            Ok(true)
         })
     }
 }

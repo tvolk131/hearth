@@ -7,7 +7,7 @@ use super::{
     store::{Catalog, Job, Record, Store, failure, now},
     transport::{Descriptor, Network},
 };
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use iroh::{Endpoint, SecretKey, endpoint::presets};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
@@ -506,7 +506,10 @@ impl Service {
             PeerMessage::Status {} => Ok(json!(record)),
             PeerMessage::Manifest { manifest } => {
                 if record.phase == Phase::Blocked {
-                    bail!("destination migration is blocked; inspect retained state");
+                    return Err(DestinationBlocked(
+                        "destination migration is blocked; inspect retained state".into(),
+                    )
+                    .into());
                 }
                 if let Some(old) = &record.manifest {
                     ensure!(old == &manifest, "stopped manifest cannot be replaced");
@@ -528,13 +531,30 @@ impl Service {
                     r.updated_at = now();
                     Ok(())
                 })?;
-                let proof = self
+                let proof = match self
                     .helper(HostMigrationRequest::Prepare {
                         plan: record.plan.clone(),
                         role: Role::Destination,
                         manifest: Some(manifest.value.clone()),
                     })
-                    .await?;
+                    .await
+                {
+                    Ok(proof) => proof,
+                    // The destination's coordinator never revisits Preparing,
+                    // so a typed ambiguity must block this record here; the
+                    // source learns it from the typed refusal below.
+                    Err(error) if blocks_transfer(&error, Phase::Preparing, false) => {
+                        let message = format!("{error:#}");
+                        self.change(&id, |r| {
+                            r.phase = Phase::Blocked;
+                            r.error = Some(message.clone());
+                            r.updated_at = now();
+                            Ok(())
+                        })?;
+                        return Err(DestinationBlocked(message).into());
+                    }
+                    Err(error) => return Err(error),
+                };
                 self.change(&id, |r| {
                     r.helper_proof = Some(proof);
                     r.set_manifest(manifest, now())?;
@@ -706,14 +726,7 @@ impl Service {
         let bytes = timeout(Duration::from_secs(120), receive.read_to_end(MAX_FRAME))
             .await
             .context("migration peer reply timed out; exact request may be retried")??;
-        let response: Value = serde_json::from_slice(&bytes)?;
-        ensure!(
-            response["ok"] == true,
-            "migration peer refused request: {}",
-            response["error"].as_str().unwrap_or("invalid reply")
-        );
-
-        Ok(response["result"].clone())
+        peer_reply(serde_json::from_slice(&bytes)?)
     }
     async fn seal(&self, id: &str) -> Result<()> {
         let record = self.record(id)?;
@@ -1101,6 +1114,9 @@ impl Service {
             };
             let response = match result {
                 Ok(result) => json!({"ok":true,"result":result}),
+                Err(error) if error.downcast_ref::<DestinationBlocked>().is_some() => {
+                    json!({"ok":false,"error":error.to_string(),"code":DESTINATION_BLOCKED})
+                }
                 Err(error) => json!({"ok":false,"error":error.to_string()}),
             };
             let bytes = serde_json::to_vec(&response)?;
@@ -1140,6 +1156,38 @@ impl Service {
 /// text never decides: a peer's error is relayed as text, so it can never
 /// block this endpoint. A transfer whose ownership handoff is already
 /// committed is never blocked; it keeps retrying until it settles.
+/// Wire code for a destination refusal because its own record is blocked.
+const DESTINATION_BLOCKED: &str = "destination_blocked";
+
+/// A destination refusal that must also block the source.
+#[derive(Debug)]
+struct DestinationBlocked(String);
+impl std::fmt::Display for DestinationBlocked {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str(&self.0)
+    }
+}
+impl std::error::Error for DestinationBlocked {}
+
+/// The result of a destination reply. A refusal is plain text and never
+/// blocks the source, except a destination that blocked its own record: that
+/// arrives as a typed ambiguity, so the source blocks too unless its handoff
+/// is already committed.
+pub fn peer_reply(response: Value) -> Result<Value> {
+    if response["ok"] != true && response["code"] == DESTINATION_BLOCKED {
+        return Err(host::HelperError::ambiguous(format_args!(
+            "migration destination blocked the transfer: {}",
+            response["error"].as_str().unwrap_or("no detail")
+        )));
+    }
+    ensure!(
+        response["ok"] == true,
+        "migration peer refused request: {}",
+        response["error"].as_str().unwrap_or("invalid reply")
+    );
+    Ok(response["result"].clone())
+}
+
 pub fn blocks_transfer(error: &anyhow::Error, phase: Phase, handoff_committed: bool) -> bool {
     host::HelperError::has_code(error, host::HelperErrorCode::Ambiguous)
         && !handoff_committed

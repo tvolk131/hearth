@@ -12,7 +12,7 @@ use pve_dev::control::{
         Phase, RetryPolicy, SimulatedWorld, Step, World, rpc, serve_until,
     },
     migration::Phase as TransferPhase,
-    migration_transport::blocks_transfer,
+    migration_transport::{blocks_transfer, peer_reply},
     protocol::{OperationStatus, Role, User, Vm, VmState},
     store::{Binding, Job, Store},
     vm_change::{JobExtension, RecoveryKind, RecoverySpec},
@@ -664,4 +664,63 @@ fn only_this_controllers_typed_helper_ambiguity_blocks_a_transfer() {
         TransferPhase::Preparing,
         false
     ));
+}
+
+#[tokio::test]
+async fn a_stopping_helper_refuses_new_migration_effects_but_still_answers_reads() {
+    let lab = Lab::new();
+    let host = lab.open(RetryPolicy::default()).await;
+    let migration = |request| HostRequest::Migration {
+        environment: ENV.into(),
+        request: Box::new(request),
+    };
+    use pve_dev::control::migration::HostMigrationRequest;
+    let fence = || {
+        migration(HostMigrationRequest::Fence {
+            migration_id: "m-unknown".into(),
+        })
+    };
+    let inspect = || {
+        migration(HostMigrationRequest::Inspect {
+            migration_id: "m-unknown".into(),
+        })
+    };
+    // Before stopping, both reach the handler and fail on the unknown record.
+    for request in [fence(), inspect()] {
+        let error = host.handle(request).await.unwrap_err();
+        assert!(
+            !format!("{error:#}").contains("helper is stopping"),
+            "{error:#}"
+        );
+    }
+    host.request_shutdown();
+    let error = host.handle(fence()).await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("helper is stopping"),
+        "{error:#}"
+    );
+    let error = host.handle(inspect()).await.unwrap_err();
+    assert!(
+        !format!("{error:#}").contains("helper is stopping"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn only_a_destination_that_blocked_its_own_record_blocks_the_source() {
+    let refused = peer_reply(json!({"ok":false,"error":"ambiguous preparation"})).unwrap_err();
+    assert!(!blocks_transfer(&refused, TransferPhase::Fenced, false));
+    let blocked = peer_reply(json!({
+        "ok":false,
+        "error":"preparation outcome is ambiguous",
+        "code":"destination_blocked",
+    }))
+    .unwrap_err();
+    assert!(format!("{blocked:#}").contains("preparation outcome is ambiguous"));
+    assert!(blocks_transfer(&blocked, TransferPhase::Fenced, false));
+    assert!(!blocks_transfer(&blocked, TransferPhase::Ready, true));
+    assert_eq!(
+        peer_reply(json!({"ok":true,"result":{"phase":"receiving"}})).unwrap(),
+        json!({"phase":"receiving"})
+    );
 }
