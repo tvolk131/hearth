@@ -4,15 +4,15 @@ The existing `create` plan remains a blank-disk fixture. An optional `guest` spe
 
 ## Client interface
 
-The administrator must include each approved digest in the daemon's immutable environment binding at initialization (`pve-devd init ... --guest-image-sha256 SHA256`, repeatable), as well as in the helper allowlist below. `pve-devctl --profile lab.json images` lists the admitted digests. An unknown digest is rejected before a VMID or budget is allocated. Updating this binding is not an online image-management feature: use new disposable lab state until an audited migration path exists.
+The administrator must include each approved digest in the daemon's immutable environment binding at initialization (`hearthd init ... --guest-image-sha256 SHA256`, repeatable), as well as in the helper allowlist below. `hearth --profile lab.json images` lists the admitted digests. An unknown digest is rejected before a VMID or budget is allocated. Updating this binding is not an online image-management feature: use new disposable lab state until an audited migration path exists.
 
 ```sh
-pve-devctl --profile lab.json create-user \
+hearth --profile lab.json create-user \
   --request-id labdev-user-1 --user-id labdev --budget-mib 5120 \
   --min-memory-budget-mib 512 --max-memory-budget-mib 1024 \
   --max-cores 4 --max-vms 1
 
-pve-devctl --profile lab.json vm create \
+hearth --profile lab.json vm create \
   --request-id labdev-vm-1 --owner labdev --name dev-lab \
   --disk-mib 4096 --memory-mib 1024 --min-memory-mib 512 --cores 4 \
   --guest-image-sha256 APPROVED_IMAGE_SHA256 \

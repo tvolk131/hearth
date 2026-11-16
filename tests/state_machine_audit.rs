@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use pve_dev::control::{
+use hearth::control::{
     host::{Fault, FaultPoint, Host, HostConfig, SimulatedWorld, Step, World},
     protocol::{OperationStatus, Role, User, Vm, VmState},
     store::Job,
@@ -78,7 +78,7 @@ fn owner() -> User {
         max_vms: 4,
         ready: false,
         policy_revision: 0,
-        state: pve_dev::control::protocol::AccountState::Active,
+        state: hearth::control::protocol::AccountState::Active,
     }
 }
 
@@ -393,11 +393,11 @@ async fn recorded_running_task_must_finish_before_recovery_authorizes_delete() {
     );
     assert_eq!(
         host.journal().unwrap().machines[&9001].state,
-        pve_dev::control::host::MachineState::Deleting
+        hearth::control::host::MachineState::Deleting
     );
 }
 
-async fn deliver_pending(store: &pve_dev::control::store::Store, host: &Host, acknowledge: bool) {
+async fn deliver_pending(store: &hearth::control::store::Store, host: &Host, acknowledge: bool) {
     for record in store.pending().unwrap() {
         host.submit(record.job).unwrap();
         host.run_pending().await.unwrap();
@@ -419,7 +419,7 @@ async fn deliver_pending(store: &pve_dev::control::store::Store, host: &Host, ac
 
 #[tokio::test]
 async fn bounded_lifecycle_model_preserves_claims_and_identity_across_lost_acks_and_reopens() {
-    use pve_dev::control::{
+    use hearth::control::{
         host::MachineState,
         protocol::{Request, VmAction},
         store::{Binding, Store, disk_charge},

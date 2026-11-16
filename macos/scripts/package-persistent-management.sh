@@ -4,11 +4,11 @@ set -euo pipefail
 unset DEVELOPER_DIR SDKROOT TOOLCHAINS
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 if [[ $# -ne 3 && $# -ne 4 ]]; then
-    echo "Usage: $0 /absolute/pve-devctl /absolute/pve-dev-inventory /absolute/two-controller-settings.json [/absolute/new-output.app]" >&2
+    echo "Usage: $0 /absolute/hearth /absolute/hearth-inventory /absolute/two-controller-settings.json [/absolute/new-output.app]" >&2
     exit 64
 fi
 project="$(cd "$(dirname "$0")/../.." && pwd)"
-app="${4:-$project/.lab/persistent-management-20261112/PveDevApp.app}"
+app="${4:-$project/.lab/persistent-management-20261112/Hearth.app}"
 [[ "$app" == /* && "$app" == *.app && -d "$(dirname "$app")" ]] || { echo "Existing absolute parent and new .app output required" >&2; exit 65; }
 [[ ! -e "$app" && ! -L "$app" ]] || { echo "Refusing to overwrite existing app: $app" >&2; exit 73; }
 for binary in "$1" "$2"; do
@@ -49,30 +49,30 @@ build_dir="$(/usr/bin/swift build --disable-sandbox -c release --show-bin-path)"
 # Construct next to the target and rename only after every packaging step succeeds.
 staging="$(/usr/bin/mktemp -d "$project/.lab/persistent-management-20261112/.app-package.XXXXXX")"
 trap '/bin/rm -rf "$staging"' EXIT
-bundle="$staging/PveDevApp.app"
+bundle="$staging/Hearth.app"
 /bin/mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources/bin"
-/bin/cp "$build_dir/PveDevApp" "$bundle/Contents/MacOS/PveDevApp"
-/bin/cp "$1" "$bundle/Contents/Resources/bin/pve-devctl"
-/bin/cp "$2" "$bundle/Contents/Resources/bin/pve-dev-inventory"
+/bin/cp "$build_dir/Hearth" "$bundle/Contents/MacOS/Hearth"
+/bin/cp "$1" "$bundle/Contents/Resources/bin/hearth"
+/bin/cp "$2" "$bundle/Contents/Resources/bin/hearth-inventory"
 /usr/bin/python3 - "$3" "$bundle" "$app" <<'PY'
 import json, pathlib, plistlib, sys
 s=json.loads(pathlib.Path(sys.argv[1]).read_text())
 bundle=pathlib.Path(sys.argv[2]); final=pathlib.Path(sys.argv[3])
-s['executablePath']=str(final/'Contents/Resources/bin/pve-devctl')
-s['inventoryExecutablePath']=str(final/'Contents/Resources/bin/pve-dev-inventory')
+s['executablePath']=str(final/'Contents/Resources/bin/hearth')
+s['inventoryExecutablePath']=str(final/'Contents/Resources/bin/hearth-inventory')
 s['pollingEnabled']=False
 for server in s['servers']: server['expectedBackend']='managed'
 if not s.get('selectedServerId'): s['selectedServerId']=s['servers'][0]['id']
 (bundle/'Contents/Resources/bootstrap-settings.json').write_text(json.dumps(s, indent=2)+'\n')
-info={'CFBundleExecutable':'PveDevApp','CFBundleIdentifier':'dev.pve.persistent-management-20261112',
-      'CFBundleName':'PVE Dev Management','CFBundleDisplayName':'PVE Dev Management','CFBundlePackageType':'APPL',
+info={'CFBundleExecutable':'Hearth','CFBundleIdentifier':'dev.pve.persistent-management-20261112',
+      'CFBundleName':'Hearth','CFBundleDisplayName':'Hearth','CFBundlePackageType':'APPL',
       'CFBundleShortVersionString':'1.0','CFBundleVersion':'20261112','LSMinimumSystemVersion':'14.0',
       'NSHighResolutionCapable':True,'PveDevSettingsSuite':'dev.pve.persistent-management-20261112',
       'PveDevLedgerNamespace':'PveDevApp-persistent-management-20261112'}
 with (bundle/'Contents/Info.plist').open('wb') as f: plistlib.dump(info,f)
 PY
-/usr/bin/codesign --force --sign - "$bundle/Contents/Resources/bin/pve-devctl"
-/usr/bin/codesign --force --sign - "$bundle/Contents/Resources/bin/pve-dev-inventory"
+/usr/bin/codesign --force --sign - "$bundle/Contents/Resources/bin/hearth"
+/usr/bin/codesign --force --sign - "$bundle/Contents/Resources/bin/hearth-inventory"
 /usr/bin/codesign --force --sign - "$bundle"
 /usr/bin/codesign --verify --deep --strict "$bundle"
 [[ ! -e "$app" && ! -L "$app" ]] || { echo "Destination appeared; refusing overwrite" >&2; exit 73; }

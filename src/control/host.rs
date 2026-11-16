@@ -3753,7 +3753,7 @@ impl Host {
     pub async fn worker(&self) {
         while !self.stopping() {
             if let Err(error) = self.run_pending().await {
-                eprintln!("pve-dev-host worker paused: {error:#}");
+                eprintln!("hearth-host worker paused: {error:#}");
                 if error.chain().any(|cause| cause.is::<Crash>()) {
                     return;
                 }
@@ -4494,7 +4494,7 @@ impl Host {
         match self.reconcile_intent(context, step).await {
             Ok(Some(identity)) => {
                 eprintln!(
-                    "pve-dev-host: {} effect reported an error but its exact postcondition was observed; verified ({error:#})",
+                    "hearth-host: {} effect reported an error but its exact postcondition was observed; verified ({error:#})",
                     step.name()
                 );
                 self.verified(context, step, identity, None)
@@ -6211,7 +6211,7 @@ pub async fn serve_until(
             let host = connections.clone();
             tokio::spawn(async move {
                 if let Err(error) = connection(host, stream).await {
-                    eprintln!("pve-dev-host connection error: {error:#}");
+                    eprintln!("hearth-host connection error: {error:#}");
                 }
             });
         }
@@ -6224,7 +6224,7 @@ pub async fn serve_until(
         Some(()) = signals.recv() => {}
     }
     eprintln!(
-        "pve-dev-host stopping: no new steps start; waiting up to {}s for the step in flight (signal again to exit now)",
+        "hearth-host stopping: no new steps start; waiting up to {}s for the step in flight (signal again to exit now)",
         grace.as_secs()
     );
     host.request_shutdown();
@@ -6237,15 +6237,15 @@ pub async fn serve_until(
     };
     tokio::select! {
         _ = drained => {
-            eprintln!("pve-dev-host stopped with no step or migration effect in flight");
+            eprintln!("hearth-host stopped with no step or migration effect in flight");
             Ok(())
         }
         _ = sleep(grace) => {
-            eprintln!("pve-dev-host stop grace expired with a step still in flight; exiting");
+            eprintln!("hearth-host stop grace expired with a step still in flight; exiting");
             Ok(())
         }
         Some(()) = signals.recv() => {
-            eprintln!("pve-dev-host received a second stop signal; exiting immediately");
+            eprintln!("hearth-host received a second stop signal; exiting immediately");
             Ok(())
         }
         error = &mut accept => Err(error.context("accepting helper connections")),

@@ -7,7 +7,7 @@ use std::{
     process::Command,
 };
 
-use pve_dev::discovery::{
+use hearth::discovery::{
     self, AlwaysFalse, COLLECTOR_VERSION, HostPin, IMPORTS_TABLE, Mapping, ObservationStore,
     ObservedVm, Outcome, ValidatedSnapshot, check_mapping, collector_source, propose_mapping,
     validate_snapshot,
@@ -21,7 +21,7 @@ const OTHER_KEY: &str = "SHA256:QPONMLKJIHGFEDCBAzyxwvutsrqponmlkjihgfedcba";
 const MACHINE: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const PEOPLE: [(&str, u32); 3] = [("erin", 101), ("frank", 102), ("heidi", 103)];
 
-fn observation_profile(directory: &TempDir) -> pve_dev::discovery::observation::ObservationProfile {
+fn observation_profile(directory: &TempDir) -> hearth::discovery::observation::ObservationProfile {
     use base64::{
         Engine,
         engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
@@ -90,7 +90,7 @@ fn observation_ssh_route_and_identity_pins_fail_closed() {
 
 #[test]
 fn observation_summary_is_host_scoped_and_never_grants_authority() {
-    use pve_dev::discovery::observation::{ObservationResult, summarize};
+    use hearth::discovery::observation::{ObservationResult, summarize};
     let directory = TempDir::new().unwrap();
     let profile = observation_profile(&directory);
     let mut value = snapshot();
@@ -1294,7 +1294,7 @@ fn collector_reports_instability_and_it_is_refused() {
 }
 
 fn cli(arguments: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_pve-dev-inventory"))
+    Command::new(env!("CARGO_BIN_EXE_hearth-inventory"))
         .args(arguments)
         .output()
         .unwrap()

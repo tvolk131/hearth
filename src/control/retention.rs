@@ -1,7 +1,7 @@
 //! Retention of finished history: deciding what may be pruned, and the JSONL
 //! archive that every pruned record is exported to first.
 //!
-//! The offline `pve-dev-ops prune` command (see
+//! The offline `hearth-ops prune` command (see
 //! [`super::maintenance::prune`]) drives this with both databases locked.
 //! Nothing here deletes anything; [`plan`] only selects records.
 //!

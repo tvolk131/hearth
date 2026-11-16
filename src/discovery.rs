@@ -2145,7 +2145,7 @@ impl ObservationStore {
                         machine_id_sha256: s.host.machine_id_sha256.clone(),
                         zpool_guid: s.zpool.guid.clone(),
                         pve_version: s.host.pve_version.clone(),
-                        importer: format!("pve-dev-inventory/{}", env!("CARGO_PKG_VERSION")),
+                        importer: format!("hearth-inventory/{}", env!("CARGO_PKG_VERSION")),
                     },
                     observed,
                     warnings: validated.warnings.clone(),

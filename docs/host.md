@@ -1,13 +1,13 @@
-# pve-dev-host: privileged disposable-lab helper
+# hearth-host: privileged disposable-lab helper
 
-`pve-dev-host` is the only component that changes Proxmox or ZFS. It runs as root **only inside the disposable QEMU Proxmox lab**. It listens on one local Unix socket and never opens a network listener. The non-root control daemon calls it through `pve_dev::control::host::rpc`.
+`hearth-host` is the only component that changes Proxmox or ZFS. It runs as root **only inside the disposable QEMU Proxmox lab**. It listens on one local Unix socket and never opens a network listener. The non-root control daemon calls it through `hearth::control::host::rpc`.
 
 ## Commands
 
 ```sh
-pve-dev-host serve --state-dir /var/lib/pve-dev-host --socket /run/pve-dev-host/host.sock --lab-config /etc/pve-dev-host/lab.json
-pve-dev-host serve --state-dir DIR --socket DIR/run/host.sock --simulate --environment <32-hex nonce> [--world FILE]
-pve-dev-host health --socket /run/pve-dev-host/host.sock
+hearth-host serve --state-dir /var/lib/pve-dev-host --socket /run/pve-dev-host/host.sock --lab-config /etc/pve-dev-host/lab.json
+hearth-host serve --state-dir DIR --socket DIR/run/host.sock --simulate --environment <32-hex nonce> [--world FILE]
+hearth-host health --socket /run/pve-dev-host/host.sock
 ```
 
 Lab config (`deny_unknown_fields`):

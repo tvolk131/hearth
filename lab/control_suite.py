@@ -222,21 +222,21 @@ def run(lab, timeout, linux_bin_dir, bootable=False, shrink=False, shrink_prepar
     started = time.monotonic()
     root = lab.ROOT
     linux_bin_dir = linux_bin_dir or root / "target/x86_64-unknown-linux-musl/release"
-    for name in ("pve-devd", "pve-dev-host"):
+    for name in ("hearthd", "hearth-host"):
         if not (linux_bin_dir / name).is_file():
             raise RuntimeError(f"Missing Linux binary {linux_bin_dir / name}; run scripts/build-lab-binaries.sh")
-    prepared_client = linux_bin_dir / "pve-devctl-native"
+    prepared_client = linux_bin_dir / "hearth-native"
     if not prepared_client.is_file():
         lab.run(["cargo", "build", "--locked", "--bins"], cwd=root)
-        prepared_client = root / "target/debug/pve-devctl"
+        prepared_client = root / "target/debug/hearth"
     nonce = secrets.token_hex(16)
     directory = lab.HOME / ("run-controller-" + time.strftime("%Y%m%dT%H%M%S") + "-" + nonce[:6])
     directory.mkdir(mode=0o700)
     binaries = directory / "bin"
     binaries.mkdir(mode=0o700)
-    client = binaries / "pve-devctl"
+    client = binaries / "hearth"
     shutil.copy2(prepared_client, client)
-    for name in ("pve-devd", "pve-dev-host"):
+    for name in ("hearthd", "hearth-host"):
         shutil.copy2(linux_bin_dir / name, binaries / name)
     evidence = directory / "evidence"
     evidence.mkdir()
@@ -265,7 +265,7 @@ def run(lab, timeout, linux_bin_dir, bootable=False, shrink=False, shrink_prepar
     if (linux_bin_dir / "build-manifest.json").is_file():
         manifest = json.loads((linux_bin_dir / "build-manifest.json").read_text())
         for name, actual in summary["artifacts_sha256"].items():
-            if manifest["binaries"].get("pve-devctl-native" if name == "pve-devctl" else name) != actual:
+            if manifest["binaries"].get("hearth-native" if name == "hearth" else name) != actual:
                 raise RuntimeError("Frozen artifact does not match its build manifest")
         lab.atomic_json(evidence / "build-manifest.json", manifest)
 
@@ -355,7 +355,7 @@ def run(lab, timeout, linux_bin_dir, bootable=False, shrink=False, shrink_prepar
                 configuration = json.dumps({"environment": nonce, "pool_guid": pool_guid,
                                             "images": [{"path": image_path, "sha256": image_sha256}]})
             remote("cat >/etc/pve-dev-controller-lab.json && chmod 600 /etc/pve-dev-controller-lab.json", input=configuration, text=True, timeout=45)
-            for name, destination in (("pve-devd", "/usr/local/bin/pve-devd"), ("pve-dev-host", "/usr/local/sbin/pve-dev-host")):
+            for name, destination in (("hearthd", "/usr/local/bin/hearthd"), ("hearth-host", "/usr/local/sbin/hearth-host")):
                 remote(f"cat >{destination} && chmod 755 {destination}", input=(binaries / name).read_bytes(), timeout=180)
             remote("set -e; useradd --system --home-dir /var/lib/pve-dev --shell /usr/sbin/nologin pve-dev; install -d -m 0750 -o root -g pve-dev /run/pve-dev-host; install -d -m 0700 -o pve-dev -g pve-dev /var/lib/pve-dev", text=True, timeout=45)
             helper_unit = """[Unit]
@@ -366,7 +366,7 @@ Type=simple
 User=root
 Group=pve-dev
 UMask=0077
-ExecStart=/usr/local/sbin/pve-dev-host serve --state-dir /var/lib/pve-dev-host --socket /run/pve-dev-host/control.sock --lab-config /etc/pve-dev-controller-lab.json
+ExecStart=/usr/local/sbin/hearth-host serve --state-dir /var/lib/pve-dev-host --socket /run/pve-dev-host/control.sock --lab-config /etc/pve-dev-controller-lab.json
 Restart=on-failure
 RestartSec=2
 KillMode=control-group
@@ -382,7 +382,7 @@ Type=simple
 User=pve-dev
 Group=pve-dev
 UMask=0077
-ExecStart=/usr/local/bin/pve-devd serve --data-dir /var/lib/pve-dev/controller
+ExecStart=/usr/local/bin/hearthd serve --data-dir /var/lib/pve-dev/controller
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
@@ -401,7 +401,7 @@ WantedBy=multi-user.target
             remote("systemctl daemon-reload && systemctl start pve-dev-host.service", text=True, timeout=45)
             image_option = f" --guest-image-sha256 {image_sha256}" if bootable else ""
             capacity_options = "--disk-capacity-mib 16384 --min-memory-capacity-mib 1536" if shrink else " ".join(controller_capacity_arguments(bootable))
-            remote(f"runuser -u pve-dev -- /usr/local/bin/pve-devd init --data-dir /var/lib/pve-dev/controller --admin {identities['erin']} --environment {nonce} --host-socket /run/pve-dev-host/control.sock --backend lab --network direct --port 7777 {capacity_options}{image_option}", text=True, timeout=90)
+            remote(f"runuser -u pve-dev -- /usr/local/bin/hearthd init --data-dir /var/lib/pve-dev/controller --admin {identities['erin']} --environment {nonce} --host-socket /run/pve-dev-host/control.sock --backend lab --network direct --port 7777 {capacity_options}{image_option}", text=True, timeout=90)
             remote("systemctl start pve-dev-controller.service", text=True, timeout=45)
             descriptor = None
             deadline = time.monotonic() + 180

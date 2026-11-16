@@ -11,7 +11,7 @@ Only an authenticated administrator may request deletion. Self-deletion and dele
 ```
 
 ```sh
-pve-devctl --profile /absolute/lab-profile.json delete-user \
+hearth --profile /absolute/lab-profile.json delete-user \
   --request-id unique-request-id --user-id alice --expected-revision 2
 ```
 

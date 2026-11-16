@@ -65,7 +65,7 @@ simply retries.
 
 There is no automatic way back: once migrated, the previously deployed binary
 cannot open either database, and it refuses bundles written by this build
-after a prune. Before upgrading a host, take a `pve-dev-ops backup` with the
+after a prune. Before upgrading a host, take a `hearth-ops backup` with the
 binary that is **currently deployed**, and keep it. Rolling back means
 restoring that bundle with the old binary; anything accepted after the upgrade
 is lost. Tests cover:
@@ -111,19 +111,19 @@ and restore.
   finished ones, newest first. `omitted_operations` counts the rest, which
   are available through `list_operations`.
 
-`pve-devctl operations` still sends the unpaged request. If the server refuses
+`hearth operations` still sends the unpaged request. If the server refuses
 it as too large, the CLI follows the pages itself. `--limit`/`--cursor` print
-one page, and `--all` fetches every page. `pve-devctl audit` pages the audit
+one page, and `--all` fetches every page. `hearth audit` pages the audit
 log the same way. The Swift client did not need changes: its dashboard decoder
 ignores the new optional field.
 
 Migrations (`migration list`) are not paged. They are limited to one record
 per VM ID (at most 65,536) and are removed when finished.
 
-## Retention: `pve-dev-ops prune`
+## Retention: `hearth-ops prune`
 
 ```sh
-pve-dev-ops prune --controller-dir /var/lib/pve-dev/controller \
+hearth-ops prune --controller-dir /var/lib/pve-dev/controller \
   --helper-dir /var/lib/pve-dev-host --archive /secure/archive-2026-11.jsonl \
   [--older-than-days 180] --expected-environment ENV \
   --expected-server SERVER_ID --expected-pool-guid GUID

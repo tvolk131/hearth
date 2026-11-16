@@ -2,7 +2,7 @@
 
 The native app can now observe independent real Proxmox/ZFS hosts, alongside its existing lab-controller connections. This path is deliberately separate from controller state, authorization, ownership mapping and the privileged mutation helper. It does not install a server component or adopt a resource. All three management-authority flags remain false.
 
-Swift starts `pve-dev-inventory` with a reviewed profile path and saved public binding. Rust loads that profile once, checks the binding before opening a connection, runs only the embedded discovery collector over SSH, validates the complete snapshot and emits a reduced typed read model. Swift never parses the host profile, reads a private key or database, constructs SSH arguments, or composes a shell command.
+Swift starts `hearth-inventory` with a reviewed profile path and saved public binding. Rust loads that profile once, checks the binding before opening a connection, runs only the embedded discovery collector over SSH, validates the complete snapshot and emits a reduced typed read model. Swift never parses the host profile, reads a private key or database, constructs SSH arguments, or composes a shell command.
 
 ## Host profile
 
@@ -36,10 +36,10 @@ Informational `vm_notes` are explicitly per host and VMID. They label a stopped 
 ## CLI and GUI
 
 ```sh
-cargo build --bin pve-dev-inventory
-target/debug/pve-dev-inventory observe-profile-info --profile /absolute/host.json
+cargo build --bin hearth-inventory
+target/debug/hearth-inventory observe-profile-info --profile /absolute/host.json
 # Save/review the public `binding` returned by that local-only inspection.
-target/debug/pve-dev-inventory observe --profile /absolute/host.json \
+target/debug/hearth-inventory observe --profile /absolute/host.json \
   --expected-binding <saved-binding> --timeout-seconds 90
 ```
 
@@ -57,7 +57,7 @@ The helper below builds a separate ad hoc signed app without launching it or rep
 
 ```sh
 python3 macos/scripts/build-read-only-review.py \
-  --inventory-executable /absolute/pve-dev-inventory \
+  --inventory-executable /absolute/hearth-inventory \
   --host 'HDD · pve1=/absolute/pve1.observation-profile.json' \
   --host 'SSD · pve2=/absolute/pve2.observation-profile.json'
 ```

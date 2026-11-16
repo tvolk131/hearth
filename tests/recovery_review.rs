@@ -1,13 +1,13 @@
 use std::os::unix::fs::PermissionsExt;
 
-use iroh::SecretKey;
-use pve_dev::control::{
+use hearth::control::{
     host::{Fault, FaultPoint, Host, HostConfig, HostRequest, Phase, SimulatedWorld, Step, World},
     protocol::*,
     services::Services,
     store::{Binding, Store},
     vm_change::RecoveryKind,
 };
+use iroh::SecretKey;
 use serde_json::{Value, json};
 
 const ENV: &str = "a123456789abcdef0123456789abcdef";
@@ -439,8 +439,7 @@ async fn an_admin_locked_out_by_a_blocked_self_policy_edit_can_still_list_and_re
     let host = std::sync::Arc::new(host);
     let serving = host.clone();
     let address = socket.clone();
-    let helper =
-        tokio::spawn(async move { pve_dev::control::host::serve(serving, &address).await });
+    let helper = tokio::spawn(async move { hearth::control::host::serve(serving, &address).await });
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while !socket.exists() {
             tokio::task::yield_now().await;

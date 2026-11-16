@@ -5,8 +5,7 @@
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use iroh::SecretKey;
-use pve_dev::control::{
+use hearth::control::{
     host::{
         EffectFault, ErrorClass, HelperError, HelperErrorCode, Host, HostConfig, HostRequest,
         Phase, RetryPolicy, SimulatedWorld, Step, World, rpc, serve_until,
@@ -17,6 +16,7 @@ use pve_dev::control::{
     store::{Binding, Job, Store},
     vm_change::{JobExtension, RecoveryKind, RecoverySpec},
 };
+use iroh::SecretKey;
 use serde_json::{Value, json};
 
 const ENV: &str = "0123456789abcdef0123456789abcdef";
@@ -90,7 +90,7 @@ fn alice() -> User {
         max_vms: 4,
         ready: false,
         policy_revision: 0,
-        state: pve_dev::control::protocol::AccountState::Active,
+        state: hearth::control::protocol::AccountState::Active,
     }
 }
 
@@ -441,7 +441,7 @@ async fn serve_drains_on_the_first_signal_and_exits_on_the_second() {
     assert_eq!(step_phase(&host, "c-9001", Step::Vm), Phase::Intent);
 }
 
-async fn wait_for_socket(socket: &std::path::Path) -> pve_dev::control::host::HostResponse {
+async fn wait_for_socket(socket: &std::path::Path) -> hearth::control::host::HostResponse {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(response) = rpc(socket, &HostRequest::Health).await {
@@ -674,7 +674,7 @@ async fn a_stopping_helper_refuses_new_migration_effects_but_still_answers_reads
         environment: ENV.into(),
         request: Box::new(request),
     };
-    use pve_dev::control::migration::HostMigrationRequest;
+    use hearth::control::migration::HostMigrationRequest;
     let fence = || {
         migration(HostMigrationRequest::Fence {
             migration_id: "m-unknown".into(),

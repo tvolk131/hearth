@@ -48,7 +48,7 @@ Read the current user from `dashboard`; an absent `policy_revision` is legacy re
 Equivalent CLI:
 
 ```sh
-pve-devctl --profile /absolute/lab-profile.json update-user-policy \
+hearth --profile /absolute/lab-profile.json update-user-policy \
   --request-id unique-request-id --user-id alice --expected-revision 0 \
   --budget-mib 256 --min-memory-budget-mib 256 --max-memory-budget-mib 1024 \
   --max-cores 4 --max-vms 4

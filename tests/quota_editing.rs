@@ -1,9 +1,9 @@
-use iroh::SecretKey;
-use pve_dev::control::{
+use hearth::control::{
     host::{Fault, FaultPoint, Host, HostConfig, MIB, SimulatedWorld, Step, World},
     protocol::*,
     store::{Binding, Store},
 };
+use iroh::SecretKey;
 use redb::ReadableTable;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -119,7 +119,7 @@ async fn safe_growth_unused_contraction_and_subsequent_lifecycle_preserve_histor
     let original = lab.store.read().unwrap().operations[created["operation_id"].as_str().unwrap()]
         .job
         .clone();
-    let fingerprint = pve_dev::control::host::fingerprint(&original).unwrap();
+    let fingerprint = hearth::control::host::fingerprint(&original).unwrap();
     for (id, budget, revision) in [("grow", 256, 1), ("contract", 64, 2)] {
         let req = lab.update(id, budget);
         let value = lab.accepted(req.clone());
@@ -160,7 +160,7 @@ async fn safe_growth_unused_contraction_and_subsequent_lifecycle_preserve_histor
         assert_eq!(world.vms[&vmid].config, before.vms[&vmid].config);
     }
     assert_eq!(
-        pve_dev::control::host::fingerprint(&original).unwrap(),
+        hearth::control::host::fingerprint(&original).unwrap(),
         fingerprint
     );
     assert_eq!(
@@ -357,7 +357,7 @@ async fn pending_increases_hold_capacity_and_competing_acceptance_is_serialized(
 #[test]
 fn legacy_job_serialization_and_canonical_fingerprint_are_pinned() {
     let value = json!({"operation_id":"legacy","kind":"ensure_user","owner":{"user_id":"alice","role":"member","budget_mib":128,"min_memory_budget_mib":256,"max_memory_budget_mib":1024,"max_cores":4,"max_vms":4,"ready":false},"vm":null});
-    let job: pve_dev::control::store::Job = serde_json::from_value(value.clone()).unwrap();
+    let job: hearth::control::store::Job = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(&job).unwrap(), value);
     let expected = r#"{"operation_id":"legacy","kind":"ensure_user","owner":{"user_id":"alice","role":"member","budget_mib":128,"min_memory_budget_mib":256,"max_memory_budget_mib":1024,"max_cores":4,"max_vms":4,"ready":false},"vm":null}"#;
     assert_eq!(serde_json::to_vec(&job).unwrap(), expected.as_bytes());
@@ -365,7 +365,7 @@ fn legacy_job_serialization_and_canonical_fingerprint_are_pinned() {
     let canonical = r#"{"kind":"ensure_user","operation_id":"legacy","owner":{"budget_mib":128,"max_cores":4,"max_memory_budget_mib":1024,"max_vms":4,"min_memory_budget_mib":256,"ready":false,"role":"member","user_id":"alice"},"vm":null}"#;
     use sha2::Digest;
     assert_eq!(
-        pve_dev::control::host::fingerprint(&job).unwrap(),
+        hearth::control::host::fingerprint(&job).unwrap(),
         format!(
             "{:x}",
             sha2::Sha256::digest([b"hearth-job-v1\n".as_slice(), canonical.as_bytes()].concat())
@@ -376,7 +376,7 @@ fn legacy_job_serialization_and_canonical_fingerprint_are_pinned() {
     assert!(!legacy.contains("policy_change"));
     assert!(!legacy.contains("policy_revision"));
     assert_eq!(
-        pve_dev::control::host::plan(pve_dev::control::JobKind::EnsureUser).unwrap(),
+        hearth::control::host::plan(hearth::control::JobKind::EnsureUser).unwrap(),
         &[Step::Control, Step::Dataset, Step::Storage]
     );
 }
@@ -580,7 +580,7 @@ async fn legacy_pending_helper_plan_and_original_owner_policy_survive_upgrade() 
     let op = lab.accepted(lab.create("legacy-pending"));
     let id = op["operation_id"].as_str().unwrap();
     let frozen = lab.store.read().unwrap().operations[id].job.clone();
-    let fingerprint = pve_dev::control::host::fingerprint(&frozen).unwrap();
+    let fingerprint = hearth::control::host::fingerprint(&frozen).unwrap();
     host.submit(frozen).unwrap();
     lab.edit(|world| {
         world.faults.push(Fault {
@@ -620,7 +620,7 @@ async fn legacy_pending_helper_plan_and_original_owner_policy_survive_upgrade() 
     assert_eq!(record.fingerprint, fingerprint);
     assert_eq!(
         record.steps.iter().map(|r| r.step).collect::<Vec<_>>(),
-        pve_dev::control::host::plan(pve_dev::control::JobKind::Create).unwrap()
+        hearth::control::host::plan(hearth::control::JobKind::Create).unwrap()
     );
     assert!(history.owners["erin"].policy.is_none());
     lab.accepted(lab.update("first-after-upgrade", 256));

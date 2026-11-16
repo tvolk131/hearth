@@ -26,7 +26,7 @@ use super::persist::{self, Layout};
 const LIMIT: u64 = 64 * 1024 * 1024;
 /// Ceiling for a backup bundle, which carries all retained history. Bundles
 /// are written and read as streams, so this bounds disk and decoded memory
-/// rather than an intermediate copy. Retention (`pve-dev-ops prune`) keeps
+/// rather than an intermediate copy. Retention (`hearth-ops prune`) keeps
 /// real deployments far below it.
 pub const BUNDLE_LIMIT: u64 = 1024 * 1024 * 1024;
 pub const QUARANTINE: &str = "restore-review-required";

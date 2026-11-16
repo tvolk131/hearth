@@ -24,7 +24,7 @@ def main():
     args = parser.parse_args()
     package = Path(__file__).resolve().parents[1]
     inventory = args.inventory_executable.resolve(strict=True)
-    output = (args.app_output or package / ".build/PveDevApp-ReadOnly.app").absolute()
+    output = (args.app_output or package / ".build/Hearth-ReadOnly.app").absolute()
     if output.exists():
         parser.error("review app already exists; choose a new --app-output or explicitly remove the old review wrapper")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -43,7 +43,7 @@ def main():
                         "mode": "observation", "observationIdentity": identity})
     if not 1 <= len(servers) <= 32 or len({s["observationIdentity"]["binding"] for s in servers}) != len(servers):
         parser.error("choose 1–32 distinct read-only hosts")
-    settings = {"executablePath": str(inventory.with_name("pve-devctl")), "inventoryExecutablePath": str(inventory),
+    settings = {"executablePath": str(inventory.with_name("hearth")), "inventoryExecutablePath": str(inventory),
                 "servers": servers, "selectedServerId": servers[0]["id"], "timeoutSeconds": 90,
                 "pollingEnabled": False, "pollingIntervalSeconds": 30}
     source = Path(tempfile.mkdtemp(prefix="readonly-review-source-", dir=output.parent))
@@ -53,7 +53,7 @@ def main():
     shutil.copy2(package / "Package.swift", source / "Package.swift")
     shutil.copytree(package / "Sources", source / "Sources")
     shutil.copytree(package / "Tests", source / "Tests")
-    entry = source / "Sources/PveDevApp/PveDevApplication.swift"
+    entry = source / "Sources/Hearth/HearthApplication.swift"
     text = entry.read_text()
     old = "@State private var model = AppModel()"
     if text.count(old) != 1:
@@ -86,7 +86,7 @@ private func makeReadOnlyReviewModel() -> AppModel {{
         relative = original.relative_to(package)
         copied = source / relative
         matches = original.read_bytes() == copied.read_bytes()
-        if original.name != "PveDevApplication.swift" and not matches:
+        if original.name != "HearthApplication.swift" and not matches:
             raise ValueError(f"unexpected review source difference: {relative}")
         hashes[str(relative)] = {"production_sha256": hashlib.sha256(original.read_bytes()).hexdigest(),
                                  "review_sha256": hashlib.sha256(copied.read_bytes()).hexdigest(), "matches": matches}
@@ -98,14 +98,14 @@ private func makeReadOnlyReviewModel() -> AppModel {{
     with log.open("w") as stream:
         subprocess.run(["/usr/bin/swift", "build", "--package-path", str(source), "--disable-sandbox", "-c", "release"],
                        check=True, stdout=stream, stderr=subprocess.STDOUT, env=environment, timeout=300)
-    binary = source / ".build/release/PveDevApp"
-    executable = output / "Contents/MacOS/PveDevApp"
+    binary = source / ".build/release/Hearth"
+    executable = output / "Contents/MacOS/Hearth"
     executable.parent.mkdir(parents=True)
     resources = output / "Contents/Resources"
     resources.mkdir()
     shutil.copy2(binary, executable)
     with (output / "Contents/Info.plist").open("wb") as stream:
-        plistlib.dump({"CFBundleExecutable": "PveDevApp", "CFBundleIdentifier": "dev.pve.readonlyreview",
+        plistlib.dump({"CFBundleExecutable": "Hearth", "CFBundleIdentifier": "dev.pve.readonlyreview",
                       "CFBundleName": "PVE Read-only Review", "CFBundleDisplayName": "PVE Read-only Review",
                       "CFBundlePackageType": "APPL", "CFBundleVersion": "3", "CFBundleShortVersionString": "0.3",
                       "NSHighResolutionCapable": True, "LSMinimumSystemVersion": "14.0"}, stream)

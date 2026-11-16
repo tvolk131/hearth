@@ -2,7 +2,7 @@
 use std::process::{Command, Output};
 
 fn cli(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pve-devctl"))
+    Command::new(env!("CARGO_BIN_EXE_hearth"))
         .args(args)
         .output()
         .unwrap()
@@ -136,7 +136,7 @@ fn unknown_force_actions_and_invalid_root_selectors_are_rejected_by_the_parser()
 }
 
 fn ops(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_pve-dev-ops"))
+    Command::new(env!("CARGO_BIN_EXE_hearth-ops"))
         .args(args)
         .output()
         .unwrap()

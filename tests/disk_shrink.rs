@@ -1,10 +1,10 @@
-use iroh::SecretKey;
-use pve_dev::control::{
+use hearth::control::{
     host::{Fault, FaultPoint, Host, HostConfig, MIB, SimulatedWorld, Step, World},
     protocol::*,
     shrink::ShrinkSpec,
     store::{Binding, Store},
 };
+use iroh::SecretKey;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -450,15 +450,15 @@ async fn read_only_plan_holds_and_tampered_claims_are_checked() {
     lab.flush(&host).await;
     let mut c = lab.store.read().unwrap();
     c.disk_shrinks.clear();
-    assert!(pve_dev::control::store::validate_scope(&c).is_err());
+    assert!(hearth::control::store::validate_scope(&c).is_err());
     let mut j = host.journal().unwrap();
     j.disk_shrinks.clear();
-    assert!(pve_dev::control::host::validate_scope(&j).is_err());
+    assert!(hearth::control::host::validate_scope(&j).is_err());
 }
 
 #[tokio::test]
 async fn durable_progress_tracks_verified_steps_and_survives_helper_reopen() {
-    use pve_dev::control::host::HostRequest;
+    use hearth::control::host::HostRequest;
     let (lab, host) = Lab::new().await;
     let accepted = lab.shrink();
     let id = accepted["operation_id"].as_str().unwrap();
@@ -564,7 +564,7 @@ async fn blocked_copy_fixture() -> (Lab, Host, String) {
     (lab, host, id)
 }
 async fn inspection(host: &Host, id: &str) -> Value {
-    host.handle(pve_dev::control::host::HostRequest::InspectOperation {
+    host.handle(hearth::control::host::HostRequest::InspectOperation {
         environment: ENV.into(),
         operation_id: id.into(),
     })
@@ -576,7 +576,7 @@ async fn inspection(host: &Host, id: &str) -> Value {
 
 #[tokio::test]
 async fn explicit_recovery_accepts_a_proved_effect_without_replaying_the_copy() {
-    use pve_dev::control::vm_change::RecoveryKind;
+    use hearth::control::vm_change::RecoveryKind;
     let (lab, host, id) = blocked_copy_fixture().await;
     let stage = lab.world();
     let original = stage.datasets[ROOT]["guid"].clone();
@@ -629,7 +629,7 @@ async fn explicit_recovery_accepts_a_proved_effect_without_replaying_the_copy() 
 
 #[tokio::test]
 async fn explicit_pre_swap_abort_preserves_source_and_releases_only_its_workspace() {
-    use pve_dev::control::vm_change::RecoveryKind;
+    use hearth::control::vm_change::RecoveryKind;
     let (lab, host, id) = blocked_copy_fixture().await;
     let source = lab.world().datasets[ROOT].clone();
     let review = inspection(&host, &id).await;
@@ -673,7 +673,7 @@ async fn explicit_pre_swap_abort_preserves_source_and_releases_only_its_workspac
 
 #[tokio::test]
 async fn stale_recovery_inspection_cannot_release_claims_or_adopt_changed_original() {
-    use pve_dev::control::vm_change::RecoveryKind;
+    use hearth::control::vm_change::RecoveryKind;
     let (lab, host, id) = blocked_copy_fixture().await;
     let review = inspection(&host, &id).await;
     let guid = lab.world().datasets[ROOT]["guid"].clone();

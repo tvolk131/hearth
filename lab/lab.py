@@ -369,7 +369,7 @@ def main():
     parser = argparse.ArgumentParser(description="Disposable, loopback-only real Proxmox lab; never uses production SSH config")
     parser.add_argument("command", choices=["build", "control-test", "guest-test"])
     parser.add_argument("--timeout", type=int, default=5400)
-    parser.add_argument("--linux-bin-dir", type=pathlib.Path, help="Directory containing Linux pve-devd and pve-dev-host binaries for control-test")
+    parser.add_argument("--linux-bin-dir", type=pathlib.Path, help="Directory containing Linux hearthd and hearth-host binaries for control-test")
     parser.add_argument("--accel", choices=ACCELERATORS, default=os.environ.get("PVE_LAB_ACCEL", "auto"),
                         help="Outer QEMU accelerator: auto (KVM if /dev/kvm is usable, else TCG), kvm (no fallback) or tcg (force); default $PVE_LAB_ACCEL or auto")
     arguments = parser.parse_args()

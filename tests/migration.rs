@@ -1,5 +1,5 @@
+use hearth::control::migration::*;
 use iroh::SecretKey;
-use pve_dev::control::migration::*;
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -80,11 +80,11 @@ fn pair() -> Pair {
         "grant",
     )
     .unwrap();
-    let route = pve_dev::control::transport::Descriptor {
+    let route = hearth::control::transport::Descriptor {
         schema: 1,
         endpoint: iroh::EndpointAddr::new(target_key.public()),
         environment: plan.destination.environment.clone(),
-        network: pve_dev::control::transport::Network::Loopback,
+        network: hearth::control::transport::Network::Loopback,
     };
     let mut source = TransferRecord::source(plan, sg.clone(), actor.clone(), route, 1001).unwrap();
     source.set_destination_grant(dg.clone(), 1001).unwrap();
@@ -336,7 +336,7 @@ fn every_recorded_transition_round_trips_before_next_ownership_action() {
 
 mod process {
     use super::*;
-    use pve_dev::control::{
+    use hearth::control::{
         host::{self, Host, HostConfig, SimulatedWorld},
         migration_transport::Service,
         protocol::{OperationStatus, Request, VmAction, VmState},

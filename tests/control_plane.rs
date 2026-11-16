@@ -1,11 +1,11 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
-use iroh::SecretKey;
-use pve_dev::control::{
+use hearth::control::{
     protocol::*,
     store::{Binding, Store},
     transport::{self, Descriptor, Network, Profile},
 };
+use iroh::SecretKey;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -424,9 +424,9 @@ fn device_revocation_is_immediate_and_last_administrator_is_protected() {
 
 #[test]
 fn wire_schema_rejects_unknown_fields_and_admin_budget_changes_by_members() {
-    assert!(!pve_dev::control::store::valid_name("bad-"));
-    assert!(!pve_dev::control::store::valid_name(""));
-    assert!(pve_dev::control::store::valid_name("dev-frank1"));
+    assert!(!hearth::control::store::valid_name("bad-"));
+    assert!(!hearth::control::store::valid_name(""));
+    assert!(hearth::control::store::valid_name("dev-frank1"));
     assert!(serde_json::from_value::<Request>(json!({"action":"create_vm","request_id":"one","name":"one","disk_mib":32,"memory_mib":128,"min_memory_mib":128,"cores":1,"owner":null,"shell":"danger"})).is_err());
     assert!(
         serde_json::from_value::<Request>(json!({"action":"dashboard","owner":"heidi"})).is_err()
