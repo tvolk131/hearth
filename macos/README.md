@@ -1,6 +1,6 @@
 # PveDevApp: experimental macOS lab client
 
-> **Experimental.** Lab and simulated controllers create VMs with **blank root disks**. Physical-trial controllers require an explicitly configured disposable-resource scope and advertise each enabled maintenance capability. A separate **Read-only Host** connection observes real Proxmox/ZFS machines over pinned SSH and offers no changes or enrollment. The controller's `environment` and `backend` values are shown on its Overview.
+> **Experimental.** Lab and simulated controllers create VMs with **blank root disks**. Physical-trial controllers require an explicitly configured disposable-resource scope and advertise each enabled maintenance capability. A separate **Read-only Host** connection observes real Proxmox/ZFS machines over pinned SSH and offers no changes or enrollment. Each controller's environment and backend appear as a badge on its **Servers** home card; a physical trial is shown in orange.
 
 PveDevApp is a native SwiftUI frontend (macOS 14+) over the Rust `pve-devctl` CLI. It is deliberately thin:
 
@@ -21,7 +21,8 @@ PveDevApp is a native SwiftUI frontend (macOS 14+) over the Rust `pve-devctl` CL
 | `Sources/PveDevCore/MutationLedger.swift` | Request-ID retention and on-disk pending-request ledger |
 | `Sources/PveDevCore/AppSettings.swift`, `ServerProfile.swift` | Named servers, pinned public identities, path validation and settings migration |
 | `Sources/PveDevCore/FormDrafts.swift`, `Permissions.swift`, `SafeText.swift` | Form validation, visibility rules, display sanitising |
-| `Sources/PveDevApp/*` | SwiftUI app: sidebar, Overview, VMs, Operations, Pending Requests, Users, Devices, Settings |
+| `Sources/PveDevCore/DisplayVocabulary.swift` | Canonical display strings for wire values (Owner, Needs investigation, Completed, transfer phases) |
+| `Sources/PveDevApp/*` | SwiftUI app: sidebar, Servers home, VMs, Operations, Pending Requests, Users, Devices, Settings |
 | `Tests/PveDevCoreTests/*` | Swift Testing suites |
 
 ## Build, test, run
@@ -53,7 +54,7 @@ Open **Settings** (⌘,) and choose:
 2. Under **Servers**, add a name and choose an absolute **Profile JSON** path for each lab controller. Other extensions, such as `.redb` or key files, are refused.
 3. Click **Save and Trust Profile**. The CLI reads the local profile and private key and returns only the public server ID, environment ID and device ID. This does not connect to a server. Every subsequent request verifies the saved IDs against the exact profile and key used for that request.
 4. Choose the active server in the sidebar, then refresh. Each server retains its own dashboard, permissions, loading indicator, errors and refresh time. There is no aggregate view.
-5. **Request timeout** is 5–600 s, default 60 s. **Auto-refresh interval** is 5–3600 s. Enable it separately for each server in **Lab → Auto-refresh Dashboard Every …s**. Polling on a server continues if you select another server; it starts off for every server at launch.
+5. **Request timeout** is 5–600 s, default 60 s. **Auto-refresh interval** is 5–3600 s. Enable it separately for each server in **Management → Auto-refresh <server> Every …s**. Each server polls only itself: servers with auto-refresh off and read-only hosts are never refreshed in the background, including on the fleet pages. Polling on a server continues if you select another server; it starts off for every server at launch. A failed background read pauses that server's auto-refresh and shows **Auto-refresh paused · Retry** until an explicit read succeeds.
 
 Settings use `UserDefaults` key `PveDevApp.settings.v2`. A previous `v1` single profile becomes **Default Server** without changing the legacy record. Inspect and trust it once before connecting. Existing pending requests have no trustworthy saved identities and remain available for review/discard; they cannot be retried. Removing a server keeps its pending requests. Changing a profile path clears its saved trust; replacing a profile or key in place causes requests to fail locally until you explicitly trust the new identity.
 
@@ -127,15 +128,16 @@ Each mutation attempt gets a request ID once. That ID is kept until the server a
 ## UI behaviour
 
 - The status banner occupies one shared header with the same inset on every page. The toolbar orders page-specific controls before Refresh, which always remains rightmost. VM/operation filters retain their values while navigating within the window.
-- **Overview**: identity, role, environment and backend, plus your own budget: disk allocated and remaining, maximum and minimum memory, cores and VM count against your limits. Admins see everyone's data, but the budget shown is their own. It also shows active and blocked operations and a VM summary.
-- **Virtual Machines**: a sortable table with owner, resources and state, and start/stop/delete controls shown only to the owner or an admin, enabled by state.
+- **Vocabulary**: the UI says **Owner** (not "Managed by"), **Needs investigation** for a blocked VM or operation, and **Completed** for a successful (`verified`) operation. Transfer phases are shown as readable labels, for example "Source · Handed off to destination" for `relinquished`. Wire values are unchanged.
+- **Servers** (home): one card per controller with your identity and role, an environment/backend badge (Lab, Simulated, Managed, or an orange **Physical trial**), your own budget used and remaining (disk, memory, cores, VM count against your limits), active and needs-investigation operation counts, and data freshness. Admins see everyone's data, but the budget shown is their own. Hardware and storage inventory appears only for administrators; it is never requested for members. Opening the page only loads servers that have never been read.
+- **Virtual Machines**: the single, sortable table across all controllers, with server, owner, resources and state. Power actions are shown only to the owner or an admin, enabled by state, and every one (including **Start**) opens a review sheet; Start is checked against same-named VMs on other servers. Delete, and Stop of an existing VM, need the typed `server/name`. Disabled actions show their reason as a subtitle/tooltip. Administrators also get **Expand Disk…**, **Shrink Disk…/Finish Shrink…** and **Move VM…** for stopped VMs; opening one selects that VM's server. Imported read-only VMs are listed below the table.
+  - **New VM** and **Enroll VM…** list each controller; unavailable servers are disabled with their reason.
   - **New VM** collects name, `disk_mib`, `memory_mib`, `min_memory_mib` and `cores`. Admins also get an owner picker.
-  - **Stop** needs confirmation. **Delete** needs you to type the VM name.
-- **Operations**: status, step, error, owner, operation ID and request ID, with progress shown for queued and running operations. When the selected filter has no results, the empty-state icon and text are centered in the available page area below the shared header.
-- **Pending Requests**: unacknowledged and rejected requests, with Retry (same ID), Cancel (terminates only that request's child process) and Discard.
+- **Operations**: status (with a **Show Completed** filter), step, error, owner, operation ID and request ID, with progress shown for queued and running operations. When the selected filter has no results, the empty-state icon and text are centered in the available page area below the shared header.
+- **Pending Requests**: unacknowledged and rejected requests, with Retry (same ID), Cancel (terminates only that request's child process) and Discard. A disabled Retry shows its reason inline.
 - **Users** (admin only): the user list, create-user form and **Edit…** budget dialog. Edits retain the origin server and expected policy revision through confirmation. Positive reductions must still cover committed allocations; no guest disk/configuration is resized. Pending/blocked owners cannot start another edit. See `../docs/quota-editing.md`.
 - **Devices** (admin only): enroll a public iroh endpoint ID for a user, and revoke an endpoint ID after confirmation.
-- Refresh is manual (toolbar button or ⌘R). The toolbar keeps one fixed-size button: refreshes longer than 300 ms replace its arrow with a spinner in the same space, and clicking during a refresh cancels it. Faster refreshes show no spinner. Optional auto-refresh lives in the Lab menu, starts off at launch, and only reloads the dashboard without sending or retrying changes. A completed mutation triggers one read-only refresh of its originating server, even if another server is selected. Replacing or removing that originating profile prevents the automatic refresh.
+- Refresh is manual (toolbar button or ⌘R). The toolbar keeps one fixed-size button: refreshes longer than 300 ms replace its arrow with a spinner in the same space, and clicking during a refresh cancels it. Faster refreshes show no spinner. Optional auto-refresh lives in the Management menu, starts off at launch, and only reloads the dashboard without sending or retrying changes. A completed mutation triggers one read-only refresh of its originating server, even if another server is selected. Replacing or removing that originating profile prevents the automatic refresh.
 
 ## Validation and known gaps
 
@@ -169,7 +171,7 @@ fallback. Read-only host profiles still expose no mutation or enrollment path.
   disk identities. Only an eligible server plan can be submitted, with its exact
   plan ID and explicit ownership/budget confirmation.
 - **Operations → Inspect and Recover…** displays fresh server evidence for a
-  blocked operation. It offers only recognized actions enumerated by that
+  blocked (Needs investigation) operation. It offers only recognized actions enumerated by that
   inspection; its inspection ID is retained in the pending request. A verified
   abort is shown as **Cancelled**, not completed. No generic force action exists.
 - **More Actions → Move VM…** loads a separately trusted destination profile and

@@ -53,12 +53,12 @@ struct OperationRow: View {
 struct OperationsView: View {
     @Environment(AppModel.self) private var model
     @State private var inspectionTarget: OperationInspectionTarget?
-    @Binding var showVerified: Bool
+    @Binding var showCompleted: Bool
 
     var body: some View {
         DashboardGate { dashboard in
             let operations = dashboard.operations
-                .filter { showVerified || $0.status != .verified }
+                .filter { showCompleted || $0.status != .verified }
                 .sorted { $0.createdAt > $1.createdAt }
             if operations.isEmpty {
                 ContentUnavailableView("No operations", systemImage: "list.bullet.rectangle")
@@ -78,7 +78,7 @@ struct OperationsView: View {
                                     .controlSize(.small)
                                 }
                                 HStack(spacing: 12) {
-                                    Text("Owner: \(operation.owner)")
+                                    Text("\(DisplayVocabulary.owner): \(operation.owner)")
                                     Text("Operation: \(SafeText.sanitize(operation.operationId, limit: 64))")
                                     Text("Request: \(SafeText.sanitize(operation.requestId, limit: 64))")
                                 }
@@ -113,7 +113,7 @@ private struct OperationProgressView: View {
             if let fraction = progress.fractionCompleted {
                 HStack(spacing: 8) {
                     ProgressView(value: fraction).frame(maxWidth: 180)
-                    Text("\(progress.completedSteps) of \(progress.totalSteps) stages verified")
+                    Text("\(progress.completedSteps) of \(progress.totalSteps) stages completed")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .accessibilityElement(children: .combine)

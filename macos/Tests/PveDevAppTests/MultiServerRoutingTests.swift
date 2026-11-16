@@ -634,7 +634,7 @@ struct MultiServerRoutingTests {
     let vm = Vm(
       vmId: 9001, owner: "erin", name: "same-name", diskMib: 4096, memoryMib: 1024,
       minMemoryMib: 512, cores: 1, state: .stopped)
-    let target = LegacyVmTarget(vm: vm, origin: a)
+    let target = VmSheetTarget(vm: vm, origin: a)
     f.model.selectServer(f.b.id)
     #expect(target.originForReview(current: f.model.requestOrigin) == nil)
     #expect(target.vm == vm && target.origin == a)

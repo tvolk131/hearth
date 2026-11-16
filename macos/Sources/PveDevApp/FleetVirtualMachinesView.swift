@@ -8,18 +8,33 @@ private struct FleetVmAction: Identifiable {
   let kind: VmActionKind
 }
 
+/// A disk or transfer sheet's VM and reviewed route. A sheet never rebinds its VM
+/// to a later selection: a changed route yields no origin and the send is refused.
+struct VmSheetTarget: Identifiable {
+  let id = UUID()
+  let vm: Vm
+  let origin: MutationOrigin?
+  var kind: FleetMaintenance = .grow
+  func originForReview(current: MutationOrigin?) -> MutationOrigin? {
+    origin == current ? origin : nil
+  }
+  var name: String { vm.name }
+  var vmId: UInt16 { vm.vmId }
+}
+
+/// The single VM table: every trusted controller, with power actions reviewed in a
+/// sheet and administrator disk/transfer actions bound to the VM's own server.
 struct FleetVirtualMachinesView: View {
   @Environment(AppModel.self) private var model
   @Binding var showDeleted: Bool
   @State private var serverFilter: UUID?
   @State private var action: FleetVmAction?
+  @State private var maintenance: VmSheetTarget?
   @State private var sortOrder = [
     KeyPathComparator(\FleetVm.serverName), KeyPathComparator(\FleetVm.vmId),
   ]
   private var servers: [ServerProfile] {
-    model.settings.servers.filter {
-      !$0.isReadOnly && (serverFilter == nil || $0.id == serverFilter)
-    }
+    model.fleetServers.filter { serverFilter == nil || $0.id == serverFilter }
   }
   private var rows: [FleetVm] {
     model.fleetRows.filter {
@@ -27,13 +42,20 @@ struct FleetVirtualMachinesView: View {
         && (showDeleted || $0.vm.state != .deleted)
     }.sorted(using: sortOrder)
   }
+  private var importedSections: [(server: ServerProfile, records: [ImportedVm])] {
+    servers.compactMap { server in
+      guard let records = model.dashboard(forServer: server.id)?.importedVms, !records.isEmpty
+      else { return nil }
+      return (server, records)
+    }
+  }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
       HStack {
         Picker("Server", selection: $serverFilter) {
           Text("All servers").tag(Optional<UUID>.none)
-          ForEach(model.settings.servers.filter { !$0.isReadOnly }) {
+          ForEach(model.fleetServers) {
             Text($0.name).tag(Optional($0.id))
           }
         }.fixedSize()
@@ -42,10 +64,14 @@ struct FleetVirtualMachinesView: View {
           .secondary)
       }.padding(.horizontal, 20)
       ForEach(servers) { server in
-        HStack {
+        HStack(spacing: 8) {
           if model.refreshing(server.id) { ProgressView().controlSize(.small) }
           Text("\(server.name) · \(model.freshness(server.id))").font(.caption).foregroundStyle(
             .secondary)
+          if let backend = model.dashboard(forServer: server.id)?.backend {
+            BackendBadge(backend: backend)
+          }
+          AutoRefreshPausedBanner(serverId: server.id)
           Spacer()
         }.padding(.horizontal, 20)
         if let failure = model.failure(forServer: server.id) {
@@ -72,72 +98,104 @@ struct FleetVirtualMachinesView: View {
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
+        // Keep the native table's intrinsic size from expanding the split view.
         GeometryReader { geometry in
-          let compact = geometry.size.width < 860
-          Table(rows, sortOrder: $sortOrder) {
-            TableColumn("Server", value: \.serverName) { row in
-              VStack(alignment: .leading) {
-                Text(row.serverName)
-                if model.failure(forServer: row.serverId) != nil {
-                  Text("Stale").font(.caption).foregroundStyle(.orange)
-                }
-              }
-            }.width(min: compact ? 65 : 75, ideal: compact ? 65 : 120, max: compact ? 65 : nil)
-            TableColumn("Name", value: \.name) { row in
-              VStack(alignment: .leading) {
-                Text(row.vm.name).fontWeight(.medium)
-                if !row.runningDuplicates.isEmpty {
-                  Text(
-                    compact
-                      ? "Other copy active"
-                      : "Same name active on \(row.runningDuplicates.joined(separator: ", "))"
-                  ).font(
-                    .caption
-                  ).foregroundStyle(.orange)
-                }
-              }.help(
-                row.qualifiedName
-                  + (row.runningDuplicates.isEmpty
-                    ? ""
-                    : " · Same name active on " + row.runningDuplicates.joined(separator: ", ")))
-            }.width(min: compact ? 100 : 105, ideal: compact ? 100 : 190, max: compact ? 100 : nil)
-            TableColumn("ID", value: \.vmId) { Text(String($0.vm.vmId)).monospacedDigit() }.width(
-              compact ? 35 : 50)
-            TableColumn("Managed by") { Text($0.vm.owner) }.width(
-              min: compact ? 80 : 65, ideal: compact ? 80 : 100, max: compact ? 80 : nil)
-            TableColumn("Resources") { row in
-              VStack(alignment: .leading, spacing: 1) {
-                Text("\(Formatting.mib(row.vm.diskMib)) disk").font(.callout)
-                Text("\(Formatting.mib(row.vm.memoryMib)) RAM · \(row.vm.cores) vCPU").font(
-                  .caption
-                ).foregroundStyle(.secondary)
-              }.monospacedDigit()
-            }.width(min: compact ? 125 : 115, ideal: compact ? 125 : 165, max: compact ? 125 : nil)
-            TableColumn("State") { row in
-              if compact {
-                Text(SafeText.sanitize(row.vm.state.rawValue.capitalized, limit: 24)).font(.caption)
-              } else {
-                VmStateBadge(state: row.vm.state)
-              }
-            }.width(compact ? 65 : 85)
-            TableColumn("Actions") { row in actions(row, compact: compact) }.width(
-              compact ? 90 : 105)
+          table(compact: geometry.size.width < 860)
+        }
+      }
+      if !importedSections.isEmpty {
+        ScrollView {
+          VStack(alignment: .leading, spacing: 8) {
+            ForEach(importedSections, id: \.server.id) { section in
+              Text(section.server.name).font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 16)
+              ImportedVirtualMachinesView(records: section.records, serverId: section.server.id)
+            }
           }
         }
+        .frame(maxHeight: 280)
       }
     }
     .navigationTitle("Virtual Machines")
-    .task { model.refreshAll(onlyStale: true) }
+    .task { model.loadFleetIfNeeded() }
     .sheet(item: $action) { FleetVmActionSheet(action: $0) }
+    .sheet(item: $maintenance) { target in maintenanceSheet(target) }
+  }
+
+  private func table(compact: Bool) -> some View {
+    Table(rows, sortOrder: $sortOrder) {
+      TableColumn("Server", value: \.serverName) { row in
+        VStack(alignment: .leading) {
+          Text(row.serverName)
+          if model.failure(forServer: row.serverId) != nil {
+            Text("Stale").font(.caption).foregroundStyle(.orange)
+          }
+        }
+      }.width(min: compact ? 65 : 75, ideal: compact ? 65 : 120, max: compact ? 65 : nil)
+      TableColumn("Name", value: \.name) { row in
+        VStack(alignment: .leading) {
+          Text(row.vm.name).fontWeight(.medium)
+          if !row.runningDuplicates.isEmpty {
+            Text(
+              compact
+                ? "Other copy active"
+                : "Same name active on \(row.runningDuplicates.joined(separator: ", "))"
+            ).font(
+              .caption
+            ).foregroundStyle(.orange)
+          }
+        }.help(
+          row.qualifiedName
+            + (row.runningDuplicates.isEmpty
+              ? ""
+              : " · Same name active on " + row.runningDuplicates.joined(separator: ", ")))
+      }.width(min: compact ? 100 : 105, ideal: compact ? 100 : 190, max: compact ? 100 : nil)
+      TableColumn("ID", value: \.vmId) { Text(String($0.vm.vmId)).monospacedDigit() }.width(
+        compact ? 35 : 50)
+      TableColumn(DisplayVocabulary.owner) { row in
+        let own = model.dashboard(forServer: row.serverId)?.identity.userId == row.vm.owner
+        Text(row.vm.owner).foregroundStyle(own ? .primary : .secondary)
+      }.width(min: compact ? 80 : 65, ideal: compact ? 80 : 100, max: compact ? 80 : nil)
+      TableColumn("Resources") { row in
+        VStack(alignment: .leading, spacing: 1) {
+          Text("\(Formatting.mib(row.vm.diskMib)) disk").font(.callout)
+          Text(
+            "\(Formatting.mib(row.vm.minMemoryMib))–\(Formatting.mib(row.vm.memoryMib)) RAM · \(row.vm.cores) vCPU"
+          ).font(.caption).foregroundStyle(.secondary)
+          if model.dashboard(forServer: row.serverId)?.diskShrinks.contains(where: {
+            $0.vmId == row.vmId
+          }) == true {
+            Text("Recovery retained").font(.caption).foregroundStyle(.secondary)
+          }
+        }.monospacedDigit()
+      }.width(min: compact ? 125 : 115, ideal: compact ? 125 : 165, max: compact ? 125 : nil)
+      TableColumn("State") { row in
+        if compact {
+          Text(DisplayVocabulary.vmState(row.vm.state)).font(.caption)
+        } else {
+          VmStateBadge(state: row.vm.state)
+        }
+      }.width(compact ? 65 : 85)
+      TableColumn("Actions") { row in actions(row, compact: compact) }.width(
+        compact ? 90 : 105)
+    }
   }
 
   @ViewBuilder private func actions(_ row: FleetVm, compact: Bool = false) -> some View {
     if let dashboard = model.dashboard(forServer: row.serverId),
       let origin = model.origin(forServer: row.serverId)
     {
+      let power = model.availableActions(for: row)
+      let disk = model.maintenanceActions(for: row)
       if dashboard.operations.contains(where: { $0.vmId == row.vmId && $0.status == .blocked }) {
-        Text("Blocked").help("Review Operations on this VM’s server").font(.caption)
+        Text(DisplayVocabulary.needsInvestigation)
+          .help("Review Operations on this VM’s server").font(.caption)
           .foregroundStyle(.orange)
+      } else if dashboard.diskShrinks.contains(where: {
+        $0.owner == row.vm.owner && $0.vmId != row.vmId
+      }) {
+        Text("Owner disk shrink pending").font(.caption).foregroundStyle(.secondary)
+          .help("Finish this owner's disk shrink on another VM first.")
       } else if model.isVmBusy(row.vmId, on: row.serverId) {
         Text("Pending").help("Review Pending Requests on this VM’s server").font(.caption)
           .foregroundStyle(.secondary)
@@ -148,24 +206,93 @@ struct FleetVirtualMachinesView: View {
           .foregroundStyle(.secondary)
       } else {
         Menu("Actions") {
-          ForEach(dashboard.availableActions(for: row.vm), id: \.self) { kind in
-            Button(kind == .shutdown ? "Shut Down…" : kind.rawValue.capitalized + "…") {
+          ForEach(power, id: \.self) { kind in
+            let issue = model.actionIssue(for: row, kind: kind, origin: origin)
+            Button {
               action = FleetVmAction(row: row, origin: origin, kind: kind)
-            }.disabled(model.actionIssue(for: row, kind: kind, origin: origin) != nil)
+            } label: {
+              Text(kind == .shutdown ? "Shut Down…" : kind.rawValue.capitalized + "…")
+              if let issue { Text(issue) }
+            }
+            .disabled(issue != nil)
+            .help(issue ?? "")
+          }
+          if !disk.isEmpty {
+            if !power.isEmpty { Divider() }
+            ForEach(disk, id: \.self) { kind in
+              Button {
+                openMaintenance(kind, row: row)
+              } label: {
+                Label(maintenanceTitle(kind), systemImage: maintenanceIcon(kind))
+              }
+              .help(
+                "Opens on \(row.serverName). Operations and Pending Requests then show that server.")
+            }
           }
         }.fixedSize()
           .controlSize(compact ? .small : .regular)
           .disabled(
-            dashboard.availableActions(for: row.vm).isEmpty
-              || model.failure(forServer: row.serverId) != nil
+            (power.isEmpty && disk.isEmpty) || model.failure(forServer: row.serverId) != nil
           )
           .accessibilityLabel("Actions for \(row.vm.name) on \(row.serverName)")
-          .help(
-            !row.runningDuplicates.isEmpty
-              ? "Starting this copy is unavailable while a same-named VM is active elsewhere."
-              : "Actions require a current, trusted dashboard, permission and no unfinished requests."
-          )
+          .help(menuHelp(row, empty: power.isEmpty && disk.isEmpty))
       }
+    }
+  }
+
+  private func menuHelp(_ row: FleetVm, empty: Bool) -> String {
+    if model.failure(forServer: row.serverId) != nil {
+      return "Refresh \(row.serverName) successfully before changing this VM."
+    }
+    if empty {
+      return model.dashboard(forServer: row.serverId).map {
+        Permissions(identity: $0.identity).canManage(row.vm)
+      } == true
+        ? "No actions are available in this VM's current state."
+        : "Only the VM's owner or an administrator can change it."
+    }
+    if !row.runningDuplicates.isEmpty {
+      return "Starting this copy is unavailable while a same-named VM is active elsewhere."
+    }
+    return "Power actions are reviewed before sending. Disabled items explain why."
+  }
+
+  private func maintenanceTitle(_ kind: FleetMaintenance) -> String {
+    switch kind {
+    case .grow: "Expand Disk…"
+    case .shrink: "Shrink Disk…"
+    case .finishShrink: "Finish Shrink…"
+    case .move: "Move VM…"
+    }
+  }
+  private func maintenanceIcon(_ kind: FleetMaintenance) -> String {
+    switch kind {
+    case .grow: "arrow.up.left.and.arrow.down.right"
+    case .shrink: "arrow.down.right.and.arrow.up.left"
+    case .finishShrink: "checkmark.shield"
+    case .move: "arrow.left.arrow.right"
+    }
+  }
+
+  /// Disk and transfer sheets review against the selected server, so opening one
+  /// selects the VM's server first; its origin is captured after that selection.
+  private func openMaintenance(_ kind: FleetMaintenance, row: FleetVm) {
+    model.selectServer(row.serverId)
+    guard let origin = model.origin(forServer: row.serverId), origin == model.requestOrigin
+    else { return }
+    maintenance = VmSheetTarget(vm: row.vm, origin: origin, kind: kind)
+  }
+
+  @ViewBuilder private func maintenanceSheet(_ target: VmSheetTarget) -> some View {
+    let origin = target.originForReview(current: model.requestOrigin)
+    switch target.kind {
+    case .grow: DiskGrowthSheet(vm: target.vm, origin: origin)
+    case .shrink, .finishShrink:
+      DiskShrinkSheet(
+        vm: target.vm, origin: origin,
+        recovery: target.origin.flatMap { model.dashboard(forServer: $0.serverId) }?.diskShrinks
+          .first { $0.vmId == target.vmId })
+    case .move: MigrationSheet(target: MigrationSheetTarget(vm: target.vm, origin: origin))
     }
   }
 }
@@ -189,7 +316,8 @@ private struct FleetVmActionSheet: View {
     VStack(alignment: .leading, spacing: 14) {
       Text("\(title) \(action.row.vm.name)?").font(.title2.weight(.semibold))
       LabeledContent("Server", value: action.row.serverName)
-      LabeledContent("VM", value: "\(action.row.vm.vmId) · managed by \(action.row.vm.owner)")
+      LabeledContent("VM", value: "\(action.row.vm.vmId)")
+      LabeledContent(DisplayVocabulary.owner, value: action.row.vm.owner)
       if action.row.existing && [.stop, .delete].contains(action.kind) {
         Text(
           "This is an existing VM with its own data and configuration. Recreating an image does not recover its current disks."

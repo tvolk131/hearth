@@ -126,7 +126,7 @@ struct MigrationSheet: View {
                 MigrationProgress(record: transfer)
                 HStack {
                     Button("Refresh Transfer") { Task { await refreshTransfer() } }.disabled(isWorking || !sourceCurrent)
-                    if transfer.phase == "blocked" { Text("Needs investigation").foregroundStyle(.red) }
+                    if transfer.phase == "blocked" { Text(DisplayVocabulary.needsInvestigation).foregroundStyle(.red) }
                 }
                 if transfer.mayRenew {
                     Toggle("Renew the same transfer at source; require fresh destination consent", isOn: $renewConfirmed)
@@ -414,7 +414,7 @@ struct MigrationProgress: View {
     let record: MigrationTransferRecord
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text("\(record.role.capitalized): \(SafeText.sanitize(record.phase.replacingOccurrences(of: "_", with: " "), limit: 80))").fontWeight(.medium)
+            Text(DisplayVocabulary.migrationProgress(role: record.role, phase: record.phase)).fontWeight(.medium)
             if let bytes = record.transferredBytes { Text("\(bytes.formatted()) bytes transferred").font(.caption).monospacedDigit().foregroundStyle(.secondary) }
             if let error = record.error { Text(SafeText.sanitize(error, limit: 1200)).foregroundStyle(.red).textSelection(.enabled) }
         }

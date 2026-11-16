@@ -172,10 +172,15 @@ struct PendingRow: View {
               Button("Retry with Same Request ID") { model.retry(entry.id) }
                 .disabled(!model.canRetry(entry))
                 .help(
-                  isCurrentProfile
-                    ? "Resend exactly the same request to its original server and device"
-                    : "Select this request's original server and identity to retry it")
+                  model.retryIssue(entry)
+                    ?? "Resend exactly the same request to its original server and device")
             }
+          }
+        }
+        if entry.canRetry && !entry.isInFlight {
+          HStack {
+            Spacer()
+            DisabledReason(text: model.retryIssue(entry))
           }
         }
       }

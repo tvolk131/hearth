@@ -144,31 +144,55 @@ final class AppModel {
       self.inventoryTasks[id] = nil
     }
   }
+  /// Whether the signed-in account is an administrator on this server's last dashboard.
+  func isAdmin(onServer id: UUID) -> Bool {
+    Permissions(identity: sessions[id]?.dashboard?.identity).isAdmin
+  }
+  /// Never loaded, never failed: the first read for a page, not background polling.
+  private func needsInitialLoad(_ id: UUID) -> Bool {
+    guard let session = sessions[id] else { return false }
+    return session.dashboard == nil && session.refreshFailure == nil && !session.backgroundPaused
+  }
+  /// Servers the fleet pages show and refresh. Read-only SSH hosts have their own pages.
+  var fleetServers: [ServerProfile] { settings.servers.filter { !$0.isReadOnly } }
+  /// Manual refresh refreshes every fleet server. `onlyStale` is used when a page
+  /// appears: it only performs first loads (hardware inventory only for admins)
+  /// and otherwise leaves servers to their own auto-refresh setting.
   func refreshServers(onlyStale: Bool = false) {
-    for server in settings.servers where !server.isReadOnly {
-      if onlyStale
-        && (sessions[server.id]?.inventoryBackgroundPaused == true
-          || (sessions[server.id]?.inventoryRefreshedAt.map { Date().timeIntervalSince($0) < 60 }
-            ?? false))
-      {
-        continue
+    for server in fleetServers {
+      if onlyStale {
+        let session = sessions[server.id]
+        let firstInventory =
+          isAdmin(onServer: server.id) && session?.hostInventory == nil
+          && session?.inventoryBackgroundPaused != true
+        guard needsInitialLoad(server.id) || firstInventory else { continue }
       }
       refreshServer(server.id)
     }
   }
+  /// Manual refresh of every fleet server. `onlyStale` is the background path:
+  /// only servers with auto-refresh on and not paused by a failure.
   func refreshAll(onlyStale: Bool = false) {
-    for server in settings.servers {
-      if onlyStale
-        && (sessions[server.id]?.backgroundPaused == true
-          || (sessions[server.id]?.lastRefreshedAt.map {
-            Date().timeIntervalSince($0) < Double(min(30, settings.clampedPollingInterval))
-          } ?? false))
-      {
-        continue
-      }
+    for server in fleetServers {
+      if onlyStale && !shouldPoll(server.id) { continue }
       refresh(server.id)
     }
   }
+  /// First loads for fleet servers that have never been read. Servers with data
+  /// are refreshed manually or by their own auto-refresh, never by navigation.
+  func loadFleetIfNeeded() {
+    for server in fleetServers where needsInitialLoad(server.id) { refresh(server.id) }
+  }
+  /// Auto-refresh reads only servers with polling on that a failure has not paused.
+  func shouldPoll(_ id: UUID) -> Bool {
+    guard let session = sessions[id] else { return false }
+    return session.pollingEnabled && !session.backgroundPaused
+  }
+  /// A failed background read stopped this server's auto-refresh until an explicit read.
+  func autoRefreshPaused(_ id: UUID) -> Bool {
+    sessions[id]?.pollingEnabled == true && sessions[id]?.backgroundPaused == true
+  }
+  func retryAutoRefresh(_ id: UUID) { refresh(id) }
   func cancelAllRefreshes() {
     for task in refreshTasks.values { task.cancel() }
     for task in inventoryTasks.values { task.cancel() }
@@ -194,6 +218,13 @@ final class AppModel {
           ?? true)
       {
         _ = try await loadDashboard(on: origin)
+      }
+      // Hardware inventory is administrator-only; members never request it.
+      guard isAdmin(onServer: origin.serverId) else {
+        sessions[origin.serverId]?.hostInventory = nil
+        sessions[origin.serverId]?.inventoryFailure = nil
+        sessions[origin.serverId]?.inventoryBackgroundPaused = false
+        return
       }
       let inventory = try await queryOnRoute(.hostInventory, origin: origin, as: HostInventory.self)
       guard self.origin(forServer: origin.serverId) == origin else { return }
@@ -228,7 +259,6 @@ final class AppModel {
     }
   }
   var permissions: Permissions { Permissions(identity: isReadOnly ? nil : dashboard?.identity) }
-  var usesLegacyMachines: Bool { !isReadOnly && dashboard != nil && dashboard?.backend != .managed }
   var canCreateVm: Bool {
     !isReadOnly && dashboard?.canCreateManagedVm == true
       && (selectedServer?.expectedBackend == nil
@@ -360,7 +390,7 @@ final class AppModel {
     refresh(id)
   }
 
-  private func refresh(_ id: UUID) {
+  func refresh(_ id: UUID) {
     guard refreshTasks[id] == nil, let session = sessions[id] else {
       return
     }
@@ -449,11 +479,8 @@ final class AppModel {
     pollingTasks[id] = Task { [weak self] in
       while !Task.isCancelled {
         guard let self, self.sessions[id]?.pollingEnabled == true else { return }
-        if self.fleetPageActive {
-          self.refreshAll(onlyStale: true)
-        } else if self.sessions[id]?.backgroundPaused != true {
-          self.refresh(id)
-        }
+        // Each server polls only itself; servers with auto-refresh off are never touched.
+        if self.shouldPoll(id) { self.refresh(id) }
         do { try await Task.sleep(for: .seconds(interval)) } catch { return }
       }
     }
@@ -688,14 +715,27 @@ final class AppModel {
     return nil
   }
 
-  private func supports(_ request: RpcRequest) -> Bool {
-    routeIssue(request, serverId: selectedServerId) == nil
-  }
-
-  func canRetry(_ entry: PendingMutation) -> Bool {
-    guard supports(entry.request) else { return false }
-    if entry.request.requiresAdministrator && !permissions.canManageUsers { return false }
-    return entry.canRetry && isCurrent(entry) && isConfigured
+  func canRetry(_ entry: PendingMutation) -> Bool { retryIssue(entry) == nil }
+  /// Why Retry with Same Request ID is unavailable for this entry, or nil when it is available.
+  func retryIssue(_ entry: PendingMutation) -> String? {
+    guard entry.canRetry else {
+      if entry.phase == .rejected {
+        return "The server rejected this request. Discard it and submit a corrected one."
+      }
+      if entry.isInFlight { return "This request is already in progress." }
+      return "This request has no saved server identity, so it cannot be retried safely."
+    }
+    guard isCurrent(entry) else {
+      return "Select \(serverName(for: entry)) in the sidebar, with its original profile, to retry."
+    }
+    guard isConfigured else {
+      return configurationIssues.first ?? "Finish configuring this server in Settings."
+    }
+    if let issue = routeIssue(entry.request, serverId: selectedServerId) { return issue }
+    if entry.request.requiresAdministrator && !permissions.canManageUsers {
+      return "Administrator access on this server is required. Refresh its dashboard."
+    }
+    return nil
   }
   func retry(_ id: UUID) { send(id) }
   func cancelMutation(_ id: UUID) {

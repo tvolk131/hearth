@@ -27,17 +27,15 @@ struct VmStateBadge: View {
   let state: VmState
 
   var body: some View {
+    let text = DisplayVocabulary.vmState(state)
     switch state {
-    case .running: Pill(text: "Running", color: .green, systemImage: "play.fill")
-    case .stopped: Pill(text: "Stopped", color: .secondary, systemImage: "stop.fill")
-    case .creating: Pill(text: "Creating", color: .blue, systemImage: "hourglass")
-    case .deleting: Pill(text: "Deleting", color: .orange, systemImage: "hourglass")
-    case .deleted: Pill(text: "Deleted", color: .secondary, systemImage: "trash")
-    case .blocked: Pill(text: "Blocked", color: .red, systemImage: "exclamationmark.octagon.fill")
-    default:
-      Pill(
-        text: SafeText.sanitize(state.rawValue, limit: 24), color: .purple,
-        systemImage: "questionmark")
+    case .running: Pill(text: text, color: .green, systemImage: "play.fill")
+    case .stopped: Pill(text: text, color: .secondary, systemImage: "stop.fill")
+    case .creating: Pill(text: text, color: .blue, systemImage: "hourglass")
+    case .deleting: Pill(text: text, color: .orange, systemImage: "hourglass")
+    case .deleted: Pill(text: text, color: .secondary, systemImage: "trash")
+    case .blocked: Pill(text: text, color: .red, systemImage: "exclamationmark.octagon.fill")
+    default: Pill(text: text, color: .purple, systemImage: "questionmark")
     }
   }
 }
@@ -46,16 +44,14 @@ struct OperationStatusBadge: View {
   let status: OperationStatus
 
   var body: some View {
+    let text = DisplayVocabulary.operationStatus(status)
     switch status {
-    case .queued: Pill(text: "Queued", color: .secondary, systemImage: "clock")
-    case .running: Pill(text: "Running", color: .blue, systemImage: "arrow.triangle.2.circlepath")
-    case .verified: Pill(text: "Verified", color: .green, systemImage: "checkmark.seal.fill")
-    case .blocked: Pill(text: "Blocked", color: .red, systemImage: "exclamationmark.octagon.fill")
-    case .cancelled: Pill(text: "Cancelled", color: .secondary, systemImage: "xmark.circle")
-    default:
-      Pill(
-        text: SafeText.sanitize(status.rawValue, limit: 24), color: .purple,
-        systemImage: "questionmark")
+    case .queued: Pill(text: text, color: .secondary, systemImage: "clock")
+    case .running: Pill(text: text, color: .blue, systemImage: "arrow.triangle.2.circlepath")
+    case .verified: Pill(text: text, color: .green, systemImage: "checkmark.seal.fill")
+    case .blocked: Pill(text: text, color: .red, systemImage: "exclamationmark.octagon.fill")
+    case .cancelled: Pill(text: text, color: .secondary, systemImage: "xmark.circle")
+    default: Pill(text: text, color: .purple, systemImage: "questionmark")
     }
   }
 }
@@ -76,19 +72,63 @@ struct RoleBadge: View {
   }
 }
 
+/// Lab and simulated controllers use disposable lab storage; a physical trial
+/// acts on real hardware and is deliberately loud (orange, filled).
 struct BackendBadge: View {
   let backend: BackendKind
 
   var body: some View {
+    let text = DisplayVocabulary.backend(backend)
     switch backend {
-    case .lab: Pill(text: "Lab", color: .orange, systemImage: "flask.fill")
-    case .simulated: Pill(text: "Simulated", color: .teal, systemImage: "cpu")
-    case .managed: Pill(text: "Managed", color: .green, systemImage: "server.rack")
-    case .physicalTrial: Pill(text: "Physical trial", color: .orange, systemImage: "flask")
-    default:
-      Pill(
-        text: SafeText.sanitize(backend.rawValue, limit: 24), color: .purple,
-        systemImage: "questionmark")
+    case .lab: Pill(text: text, color: .blue, systemImage: "flask")
+    case .simulated: Pill(text: text, color: .teal, systemImage: "cpu")
+    case .managed: Pill(text: text, color: .green, systemImage: "server.rack")
+    case .physicalTrial:
+      Label(text, systemImage: "exclamationmark.triangle.fill")
+        .labelStyle(.titleAndIcon)
+        .font(.caption.weight(.semibold))
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2)
+        .foregroundStyle(.white)
+        .background(.orange, in: Capsule())
+    default: Pill(text: text, color: .purple, systemImage: "questionmark")
+    }
+  }
+}
+
+/// A disabled control's reason, shown inline beneath it.
+struct DisabledReason: View {
+  let text: String?
+
+  var body: some View {
+    if let text, !text.isEmpty {
+      Label(text, systemImage: "info.circle")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+  }
+}
+
+/// Shown when a failed background read paused a server's auto-refresh.
+struct AutoRefreshPausedBanner: View {
+  @Environment(AppModel.self) private var model
+  let serverId: UUID
+  var serverName: String?
+
+  var body: some View {
+    if model.autoRefreshPaused(serverId) {
+      HStack(spacing: 6) {
+        Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
+        Text((serverName.map { "\($0): " } ?? "") + "Auto-refresh paused")
+        Text("·").foregroundStyle(.secondary)
+        Button("Retry") { model.retryAutoRefresh(serverId) }
+          .buttonStyle(.link)
+          .disabled(model.refreshing(serverId))
+      }
+      .font(.caption)
+      .help("The last background refresh failed, so automatic refreshes stopped. Retry reads the dashboard once and resumes auto-refresh if it succeeds.")
+      .accessibilityElement(children: .combine)
     }
   }
 }
