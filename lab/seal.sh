@@ -76,6 +76,8 @@ shopt -s nullglob
 for secret in /etc/ssh/ssh_host_*_key /root/.ssh/id_rsa /root/.ssh/id_ecdsa /root/.ssh/id_ed25519 \
         /var/lib/cloud/instances/*/user-data.txt* /var/lib/cloud/instances/*/cloud-config.txt \
         /var/lib/cloud/instances/*/obj.pkl /var/lib/cloud/instances/*/combined-cloud-config.json; do
+    # nullglob drops unmatched patterns, but literal paths stay in the list.
+    test -e "$secret" || continue
     shred --zero --remove "$secret"
 done
 rm -f /etc/ssh/ssh_host_*_key.pub /root/.ssh/id_rsa.pub /root/.ssh/id_ecdsa.pub /root/.ssh/id_ed25519.pub
