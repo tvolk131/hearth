@@ -365,12 +365,23 @@ fn encode(result: Result<serde_json::Value, ApiError>) -> Result<Vec<u8>> {
     ))))?)
 }
 
-/// Write the one response, then wait only until the peer has acknowledged it.
-/// The caller closes the connection; the client never has to.
-async fn respond(mut send: iroh::endpoint::SendStream, response: &[u8]) -> Result<()> {
+/// How long to let a peer close the connection itself after it has
+/// acknowledged the response. Closing from this side any earlier can make the
+/// peer's QUIC stack drop the response before its application reads it.
+pub const CLOSE_GRACE: Duration = Duration::from_secs(2);
+
+/// Write the one response, wait until the peer has acknowledged it, then give
+/// the peer up to [`CLOSE_GRACE`] to close. The caller closes the connection
+/// afterwards, so a peer that never closes holds its slot only briefly.
+async fn respond(
+    connection: &iroh::endpoint::Connection,
+    mut send: iroh::endpoint::SendStream,
+    response: &[u8],
+) -> Result<()> {
     send.write_all(response).await?;
     send.finish()?;
     send.stopped().await?;
+    let _ = timeout(CLOSE_GRACE, connection.closed()).await;
     Ok(())
 }
 
@@ -430,7 +441,12 @@ async fn reject(connection: &iroh::endpoint::Connection, admission: &Admission) 
             // Read the bounded request so the client's write is not stopped
             // before it can read the reply.
             receive.read_to_end(MAX_REQUEST).await?;
-            respond(send, &encode(Err(failure("forbidden", NOT_ENROLLED)))?).await
+            respond(
+                connection,
+                send,
+                &encode(Err(failure("forbidden", NOT_ENROLLED)))?,
+            )
+            .await
         })
         .await;
     }
@@ -464,7 +480,7 @@ async fn enrolled(
             }
         }
     };
-    respond(send, &encode(result)?).await
+    respond(connection, send, &encode(result)?).await
 }
 
 pub async fn serve(
