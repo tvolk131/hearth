@@ -35,9 +35,20 @@ impl Services {
         }
         Ok(response)
     }
+    /// Inspection and recovery need only an active administrator. `ready` is
+    /// cleared while the admin's own policy edit is pending, and if that edit
+    /// blocks, these RPCs are the way out, so they must not depend on it.
     fn administrator(store: &Store, peer: &str) -> Result<User, ApiError> {
         let actor = store.actor(peer)?;
-        if actor.role != Role::Admin || !actor.ready {
+        if actor.role != Role::Admin || actor.state != AccountState::Active {
+            return Err(failure("forbidden", "active administrator required"));
+        }
+        Ok(actor)
+    }
+    /// Other helper-backed mutations still wait for a settled account.
+    fn ready_administrator(store: &Store, peer: &str) -> Result<User, ApiError> {
+        let actor = Self::administrator(store, peer)?;
+        if !actor.ready {
             return Err(failure("forbidden", "ready administrator required"));
         }
         Ok(actor)
@@ -216,7 +227,7 @@ impl Services {
                 )
             }
             Request::PlanVmEnrollment { vm_id, owner } => {
-                Self::administrator(store, peer)?;
+                Self::ready_administrator(store, peer)?;
                 let c = store
                     .read()
                     .map_err(|e| failure("internal", &e.to_string()))?;
@@ -243,7 +254,7 @@ impl Services {
                 Ok(json!(plan))
             }
             Request::Migration { request } => {
-                Self::administrator(store, peer)?;
+                Self::ready_administrator(store, peer)?;
                 let c = store
                     .read()
                     .map_err(|e| failure("internal", &e.to_string()))?;

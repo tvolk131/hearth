@@ -1,7 +1,10 @@
+use std::os::unix::fs::PermissionsExt;
+
 use iroh::SecretKey;
 use pve_dev::control::{
     host::{Fault, FaultPoint, Host, HostConfig, HostRequest, Phase, SimulatedWorld, Step, World},
     protocol::*,
+    services::Services,
     store::{Binding, Store},
     vm_change::RecoveryKind,
 };
@@ -397,4 +400,136 @@ async fn crash_after_recovery_commit_does_not_reblock_the_original() {
     );
     lab.sync(&host, &recovery);
     lab.sync(&host, &id);
+}
+
+#[tokio::test]
+async fn an_admin_locked_out_by_a_blocked_self_policy_edit_can_still_list_and_recover() {
+    // Erin is the only administrator. Her own policy edit clears `ready` while
+    // it is pending; when it blocks, inspection and recovery must still work.
+    let (lab, host) = Lab::new().await;
+    let grow = lab.send(
+        json!({"action":"grow_vm","request_id":"resize","vm_id":9001,"expected_disk_mib":4096,
+        "target_disk_mib":6144,"confirm_downtime":true}),
+    )["operation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    lab.crash(&host, &grow, Step::GrowPrepare).await;
+    let host = lab.reopen_blocked(host, &grow).await;
+    let erin = lab.store.read().unwrap().users["erin"].clone();
+    let mut policy = erin.policy();
+    policy.budget_mib = 64;
+    let edit = lab.send(
+        json!({"action":"update_user_policy","request_id":"self-edit",
+        "user_id":"erin","expected_revision":erin.policy_revision,"policy":policy}),
+    )["operation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    lab.crash_at(&host, &edit, Step::PolicyFirst, FaultPoint::BeforeEffect)
+        .await;
+    let host = lab.reopen_blocked(host, &edit).await;
+    lab.edit(|w| w.faults.clear());
+    let erin = lab.store.read().unwrap().users["erin"].clone();
+    assert!(!erin.ready && erin.state == AccountState::Active);
+
+    // The helper's socket directory must be private.
+    std::fs::set_permissions(lab.dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = lab.dir.path().join("helper.sock");
+    let host = std::sync::Arc::new(host);
+    let serving = host.clone();
+    let address = socket.clone();
+    let helper =
+        tokio::spawn(async move { pve_dev::control::host::serve(serving, &address).await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !socket.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let services = Services {
+        host_socket: socket,
+        migration: None,
+    };
+    let call = |request: Value| {
+        let request: Request = serde_json::from_value(request).unwrap();
+        services.handle(&lab.store, &lab.admin, request)
+    };
+
+    let listed = call(json!({"action":"list_operations"})).await.unwrap();
+    for id in [&grow, &edit] {
+        let record = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["operation_id"] == **id)
+            .unwrap();
+        assert_eq!(record["status"], "blocked", "{record}");
+    }
+    let fetched = call(json!({"action":"get_operation","operation_id":edit}))
+        .await
+        .unwrap();
+    assert_eq!(fetched["status"], "blocked");
+
+    // The policy edit itself has no automatic adapter: inspection works and
+    // says so, and a recovery attempt is refused on its merits, not as forbidden.
+    let review = call(json!({"action":"inspect_operation","operation_id":edit}))
+        .await
+        .unwrap();
+    assert_eq!(
+        review["classification"], "manual_review_required",
+        "{review}"
+    );
+    let refused = call(
+        json!({"action":"recover_operation","request_id":"policy-recovery",
+        "operation_id":edit,"inspection_id":review["inspection_id"],
+        "kind":"resume_verified_effect","confirm_recovery":true}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.code, "conflict", "{refused:?}");
+
+    // Other blocked work is recovered end to end while Erin is still not ready.
+    let review = call(json!({"action":"inspect_operation","operation_id":grow}))
+        .await
+        .unwrap();
+    assert!(
+        review["allowed_actions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("abort_preparation")),
+        "{review}"
+    );
+    let recovery = call(
+        json!({"action":"recover_operation","request_id":"grow-recovery",
+        "operation_id":grow,"inspection_id":review["inspection_id"],
+        "kind":"abort_preparation","confirm_recovery":true}),
+    )
+    .await
+    .unwrap()["operation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Mutations outside inspection and recovery still need a ready account.
+    let gated = call(json!({"action":"plan_vm_enrollment","vm_id":9001,"owner":"alice"}))
+        .await
+        .unwrap_err();
+    assert_eq!(gated.code, "forbidden");
+
+    // Stop the served helper (and its worker) before driving jobs by hand.
+    helper.abort();
+    let _ = helper.await;
+    lab.flush(&host).await;
+    let catalog = lab.store.read().unwrap();
+    assert_eq!(
+        catalog.operations[&recovery].public.status,
+        OperationStatus::Verified
+    );
+    assert_eq!(
+        catalog.operations[&grow].public.status,
+        OperationStatus::Cancelled
+    );
+    assert!(!catalog.users["erin"].ready);
 }
