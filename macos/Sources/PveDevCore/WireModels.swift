@@ -36,11 +36,13 @@ public struct OperationStatus: RawRepresentable, Codable, Hashable, Sendable {
     public static let verified = OperationStatus(rawValue: "verified")
     public static let blocked = OperationStatus(rawValue: "blocked")
     public static let cancelled = OperationStatus(rawValue: "cancelled")
+    /// The host helper permanently refused the job before journaling it.
+    public static let failed = OperationStatus(rawValue: "failed")
 
-    public static let known: [OperationStatus] = [.queued, .running, .verified, .blocked, .cancelled]
+    public static let known: [OperationStatus] = [.queued, .running, .verified, .blocked, .cancelled, .failed]
     public var isRecognized: Bool { Self.known.contains(self) }
     public var isActive: Bool { self == .queued || self == .running }
-    public var isTerminal: Bool { self == .verified || self == .cancelled }
+    public var isTerminal: Bool { self == .verified || self == .cancelled || self == .failed }
 }
 
 public struct BackendKind: RawRepresentable, Codable, Hashable, Sendable {

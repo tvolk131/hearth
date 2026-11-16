@@ -8,6 +8,7 @@ pub mod migration;
 pub mod migration_transport;
 pub mod physical_trial;
 pub mod protocol;
+pub mod rejection;
 pub mod services;
 pub mod shrink;
 pub mod store;

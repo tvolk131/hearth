@@ -893,6 +893,7 @@ async fn offline_physical_binding_restore_preserves_scope_and_stays_quarantined(
         task_timeout: std::time::Duration::from_secs(1),
         poll_interval: std::time::Duration::from_secs(1),
         command_timeout: std::time::Duration::from_secs(1),
+        retry: Default::default(),
     })
     .await
     .err()
@@ -958,4 +959,56 @@ fn offline_inspection_requires_identity_pins_and_preserves_existing_ledger() {
         assert!(result.stdout.is_empty());
     }
     assert!(!root.path().join("missing").exists());
+}
+
+#[tokio::test]
+async fn historical_out_of_scope_jobs_do_not_make_the_journal_unreadable() {
+    let root = tempfile::tempdir().unwrap();
+    let peer = SecretKey::generate().public().to_string();
+    let store = Store::create(&root.path().join("state.redb"), binding(), &peer).unwrap();
+    let host = Host::open(HostConfig::simulated(
+        root.path().join("helper"),
+        ENV,
+        root.path().join("world.json"),
+    ))
+    .await
+    .unwrap();
+    // A job recorded before the scope narrowed: its owner is now foreign.
+    let mut foreign = store.pending().unwrap().remove(0).job;
+    foreign.operation_id = "historical".into();
+    foreign.owner.user_id = "heidi".into();
+    foreign.owner.role = Role::Member;
+    host.submit(foreign).unwrap();
+    let mut journal = host.journal().unwrap();
+    drop(host);
+    journal.schema = 4;
+    journal.binding = HostBinding {
+        environment: ENV.into(),
+        backend: "physical_trial".into(),
+        pool_guid: "111".into(),
+        physical_trial: Some(trial()),
+        managed: None,
+    };
+    assert!(
+        journal
+            .binding
+            .validate_job(&journal.jobs["historical"].job)
+            .is_err()
+    );
+    journal.jobs.get_mut("historical").unwrap().status = OperationStatus::Verified;
+    pve_dev::control::host::validate_scope(&journal).expect("finished history stays readable");
+    // Unfinished work, including a blocked job an administrator may resume,
+    // must still fit the scope.
+    for unfinished in [
+        OperationStatus::Queued,
+        OperationStatus::Running,
+        OperationStatus::Blocked,
+    ] {
+        journal.jobs.get_mut("historical").unwrap().status = unfinished.clone();
+        let error = pve_dev::control::host::validate_scope(&journal).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("escapes explicit physical trial scope"),
+            "{unfinished:?}: {error:#}"
+        );
+    }
 }

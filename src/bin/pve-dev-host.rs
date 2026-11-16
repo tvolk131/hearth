@@ -2,7 +2,10 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Result, ensure};
 use clap::{Parser, Subcommand};
-use pve_dev::control::host::{Host, HostConfig, HostRequest, repair_managed_schema, rpc, serve};
+use pve_dev::control::host::{
+    Host, HostConfig, HostRequest, SHUTDOWN_GRACE, repair_managed_schema, rpc, serve_until,
+};
+use tokio::signal::unix::{SignalKind, signal};
 
 #[derive(Parser)]
 #[command(
@@ -106,7 +109,7 @@ async fn main() -> Result<()> {
                 host.environment(),
                 socket.display()
             );
-            serve(host, &socket).await
+            serve_until(host, &socket, stop_signals()?, SHUTDOWN_GRACE).await
         }
         Command::Health { socket } => {
             let response = rpc(&socket, &HostRequest::Health).await?;
@@ -119,4 +122,25 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Forward every SIGTERM and SIGINT. The first lets the in-flight step finish;
+/// a second one stops the helper immediately.
+fn stop_signals() -> Result<tokio::sync::mpsc::Receiver<()>> {
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                Some(()) = terminate.recv() => {}
+                Some(()) = interrupt.recv() => {}
+                else => break,
+            }
+            if sender.send(()).await.is_err() {
+                break;
+            }
+        }
+    });
+    Ok(receiver)
 }

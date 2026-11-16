@@ -6,7 +6,10 @@ use std::{
     os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -24,6 +27,7 @@ use tokio::{
 
 mod adoption;
 mod enrollment;
+mod error_policy;
 mod grow;
 mod managed;
 mod migration;
@@ -34,6 +38,10 @@ mod worker;
 
 use worker::{DEFAULT_GRACE, Worker};
 
+pub use error_policy::{
+    ClassifiedError, ErrorClass, RETRY_BUDGET, RETRY_INITIAL_DELAY, RETRY_MAX_DELAY, RetryPolicy,
+    RetryState, SHUTDOWN_GRACE, ShuttingDown, ambiguous, class_of, permanent, retryable,
+};
 pub use schema_repair::{ManagedSchemaRepairReceipt, repair_managed_schema};
 
 use super::{
@@ -168,7 +176,63 @@ struct Envelope {
     response: Option<HostResponse>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// Typed class of `error`. Absent for untyped failures, which callers
+    /// must treat as possibly transient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    code: Option<HelperErrorCode>,
 }
+
+/// A helper failure whose meaning the caller may act on, carried on the wire
+/// as [`Envelope::code`].
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HelperErrorCode {
+    /// `submit` refused the job before journaling it (validation or scope).
+    /// No effect can have happened, and resubmitting cannot succeed.
+    Rejected,
+    /// The helper cannot tell whether an effect happened; an administrator
+    /// must inspect it.
+    Ambiguous,
+}
+
+/// A typed helper failure. The helper raises it; [`rpc`] returns it to the
+/// caller, who can downcast it from the `anyhow` chain.
+#[derive(Debug)]
+pub struct HelperError {
+    pub code: HelperErrorCode,
+    pub message: String,
+}
+
+impl HelperError {
+    pub fn rejected(error: impl std::fmt::Display) -> anyhow::Error {
+        Self::coded(HelperErrorCode::Rejected, error)
+    }
+    pub fn ambiguous(error: impl std::fmt::Display) -> anyhow::Error {
+        Self::coded(HelperErrorCode::Ambiguous, error)
+    }
+    fn coded(code: HelperErrorCode, error: impl std::fmt::Display) -> anyhow::Error {
+        anyhow::Error::new(Self {
+            code,
+            message: format!("{error:#}"),
+        })
+    }
+    /// The typed helper failure in `error`'s chain, if any.
+    pub fn find(error: &anyhow::Error) -> Option<&Self> {
+        error.chain().find_map(|cause| cause.downcast_ref::<Self>())
+    }
+    /// Whether `error` carries the given typed helper code.
+    pub fn has_code(error: &anyhow::Error, code: HelperErrorCode) -> bool {
+        Self::find(error).is_some_and(|found| found.code == code)
+    }
+}
+
+impl std::fmt::Display for HelperError {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for HelperError {}
 
 #[derive(Debug)]
 pub struct Crash;
@@ -522,7 +586,14 @@ pub fn validate_scope(journal: &Journal) -> Result<()> {
                 "helper VM history escapes physical trial scope"
             );
         }
-        for job in journal.jobs.values() {
+        // Only unfinished work still needs to fit the scope. Historical jobs
+        // were validated when accepted; re-validating them on every read
+        // would let one old record make the whole journal unreadable.
+        for job in journal
+            .jobs
+            .values()
+            .filter(|job| !job.status.is_terminal())
+        {
             journal.binding.validate_job(&job.job)?;
         }
     }
@@ -604,6 +675,12 @@ pub struct HostJob {
     pub updated_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<u64>,
+    /// Backoff state while the current step fails retryably.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryState>,
+    /// Why a blocked job blocked. Absent for jobs blocked by older builds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<ErrorClass>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -718,6 +795,7 @@ pub struct HostConfig {
     pub task_timeout: Duration,
     pub poll_interval: Duration,
     pub command_timeout: Duration,
+    pub retry: RetryPolicy,
 }
 
 #[derive(Debug, Deserialize)]
@@ -748,6 +826,7 @@ impl HostConfig {
             task_timeout: Duration::from_secs(900),
             poll_interval: Duration::from_secs(1),
             command_timeout: Duration::from_secs(600),
+            retry: RetryPolicy::default(),
         })
     }
     pub fn physical_trial(state_dir: PathBuf, config_file: &Path) -> Result<Self> {
@@ -762,6 +841,7 @@ impl HostConfig {
             task_timeout: Duration::from_secs(900),
             poll_interval: Duration::from_secs(1),
             command_timeout: Duration::from_secs(600),
+            retry: RetryPolicy::default(),
         })
     }
     pub fn lab(state_dir: PathBuf, config_file: &Path) -> Result<Self> {
@@ -814,6 +894,7 @@ impl HostConfig {
             task_timeout: Duration::from_secs(900),
             poll_interval: Duration::from_secs(1),
             command_timeout: Duration::from_secs(600),
+            retry: RetryPolicy::default(),
         })
     }
 
@@ -825,6 +906,7 @@ impl HostConfig {
             task_timeout: Duration::from_millis(500),
             poll_interval: Duration::from_millis(5),
             command_timeout: Duration::from_secs(10),
+            retry: RetryPolicy::default(),
         }
     }
 }
@@ -1770,6 +1852,10 @@ impl Backend {
     }
 
     async fn facts(&self) -> Result<Facts> {
+        self.read_facts().await.map_err(retryable)
+    }
+
+    async fn read_facts(&self) -> Result<Facts> {
         match self {
             Backend::Lab(lab) => {
                 let read = |path: &'static str| async move {
@@ -1809,6 +1895,10 @@ impl Backend {
     }
 
     async fn pool_guid(&self) -> Result<String> {
+        self.read_pool_guid().await.map_err(retryable)
+    }
+
+    async fn read_pool_guid(&self) -> Result<String> {
         match self {
             Backend::Lab(lab) => Ok(lab
                 .run(
@@ -1825,6 +1915,10 @@ impl Backend {
     }
 
     async fn zfs_names(&self) -> Result<BTreeSet<String>> {
+        self.read_zfs_names().await.map_err(retryable)
+    }
+
+    async fn read_zfs_names(&self) -> Result<BTreeSet<String>> {
         match self {
             Backend::Lab(lab) => Ok(lab
                 .zfs(&[
@@ -1858,14 +1952,15 @@ impl Backend {
                         &keys.join(","),
                         name,
                     ])
-                    .await?;
+                    .await
+                    .map_err(retryable)?;
                 output
                     .lines()
                     .filter_map(|line| line.split_once('\t'))
                     .map(|(key, value)| (key.to_string(), value.to_string()))
                     .collect()
             }
-            Backend::Simulated(world) => world.load()?.zfs_get(name, keys)?,
+            Backend::Simulated(world) => world.load().map_err(retryable)?.zfs_get(name, keys)?,
         };
         for key in keys {
             ensure!(
@@ -1965,6 +2060,10 @@ impl Backend {
     }
 
     async fn owner_snapshots(&self, dataset: &str) -> Result<Vec<String>> {
+        self.read_owner_snapshots(dataset).await.map_err(retryable)
+    }
+
+    async fn read_owner_snapshots(&self, dataset: &str) -> Result<Vec<String>> {
         match self {
             Backend::Lab(lab) => Ok(lab
                 .run(
@@ -2134,11 +2233,30 @@ impl Backend {
         }
     }
 
+    /// A read. Command and transport failures are retryable; a response that
+    /// arrives but cannot be decoded is not.
     async fn api_get(&self, path: &str, query: &[(&str, String)]) -> Result<Value> {
         match self {
-            Backend::Lab(lab) => serde_json::from_str(lab.pvesh("get", path, query).await?.trim())
-                .with_context(|| format!("decoding {path}")),
-            Backend::Simulated(world) => world.load()?.api_get(path, query),
+            Backend::Lab(lab) => serde_json::from_str(
+                lab.pvesh("get", path, query)
+                    .await
+                    .map_err(retryable)?
+                    .trim(),
+            )
+            .with_context(|| format!("decoding {path}")),
+            Backend::Simulated(world) => {
+                let loaded = world.load().map_err(retryable)?;
+                if loaded.api_read_failures > 0 {
+                    world.edit(|world| {
+                        world.api_read_failures = world.api_read_failures.saturating_sub(1);
+                        Ok(())
+                    })?;
+                    return Err(retryable(anyhow!(
+                        "simulated transient API read failure for GET {path}"
+                    )));
+                }
+                loaded.api_get(path, query)
+            }
         }
     }
 
@@ -2193,6 +2311,20 @@ impl Backend {
         }
     }
 
+    /// Test hook: take a registered simulated effect failure for `step`.
+    fn effect_fault(&self, step: Step) -> Result<Option<EffectFault>> {
+        match self {
+            Backend::Lab(_) => Ok(None),
+            Backend::Simulated(world) => world.edit(|world| {
+                Ok(world
+                    .effect_faults
+                    .iter()
+                    .position(|fault| fault.step == step)
+                    .map(|index| world.effect_faults.remove(index)))
+            }),
+        }
+    }
+
     fn trip(&self, step: Step, point: FaultPoint) -> Result<()> {
         match self {
             Backend::Lab(_) => Ok(()),
@@ -2232,6 +2364,15 @@ pub struct Fault {
     pub point: FaultPoint,
 }
 
+/// A simulated effect command that returns an error. With `applied`, the
+/// effect happens first and only its reply is lost (like a timed-out `pvesh`
+/// whose task still ran); without it, nothing happens.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct EffectFault {
+    pub step: Step,
+    pub applied: bool,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SimulatedVm {
     pub config: BTreeMap<String, String>,
@@ -2256,6 +2397,15 @@ pub struct World {
     pub tasks: BTreeMap<String, Value>,
     pub faults: Vec<Fault>,
     pub stall_tasks: bool,
+    /// Upcoming simulated API reads that fail transiently.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub api_read_failures: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effect_faults: Vec<EffectFault>,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 impl World {
@@ -2282,6 +2432,8 @@ impl World {
             tasks: BTreeMap::new(),
             faults: Vec::new(),
             stall_tasks: false,
+            api_read_failures: 0,
+            effect_faults: Vec::new(),
         }
     }
 
@@ -2783,6 +2935,9 @@ pub struct Host {
     poll_interval: Duration,
     notify: Notify,
     execution: tokio::sync::Mutex<()>,
+    retry: RetryPolicy,
+    /// Set once on SIGTERM/SIGINT: no new job or step starts afterward.
+    stopping: AtomicBool,
 }
 
 fn response(binding: &HostBinding, job: &HostJob) -> HostResponse {
@@ -2991,6 +3146,8 @@ impl Host {
                 poll_interval: config.poll_interval,
                 notify: Notify::new(),
                 execution: tokio::sync::Mutex::new(()),
+                retry: config.retry,
+                stopping: AtomicBool::new(false),
             };
             check_identity(&host.backend, &host.binding).await?;
             return Ok(host);
@@ -3086,6 +3243,8 @@ impl Host {
             poll_interval: config.poll_interval,
             notify: Notify::new(),
             execution: tokio::sync::Mutex::new(()),
+            retry: config.retry,
+            stopping: AtomicBool::new(false),
         })
     }
 
@@ -3437,11 +3596,14 @@ impl Host {
                 );
                 return Ok(response(&self.binding, existing));
             }
-            self.binding.validate_job(&job)?;
-            ensure!(
-                valid_operation_id(&job.operation_id),
-                "invalid operation identifier"
-            );
+            // Refusals before anything is journaled are typed: the caller may
+            // fail the operation, because no effect can have happened.
+            self.binding
+                .validate_job(&job)
+                .map_err(HelperError::rejected)?;
+            if !valid_operation_id(&job.operation_id) {
+                return Err(HelperError::rejected("invalid operation identifier"));
+            }
             journal.sequence += 1;
             let (status, step, error, steps) = match self.binding.job_plan(&job) {
                 Ok(plan) => (
@@ -3480,6 +3642,8 @@ impl Host {
                 started_at: None,
                 updated_at: Some(super::store::now()),
                 finished_at: None,
+                retry: None,
+                failure: None,
             };
             let result = response(&self.binding, &record);
             if job.extension.is_some() {
@@ -3519,7 +3683,41 @@ impl Host {
         })
     }
 
+    /// The oldest job that may run now. A job backing off after a retryable
+    /// failure is skipped until its next attempt, and so is every later job of
+    /// the same owner, which keeps each owner's jobs in submission order.
     fn next_pending(&self) -> Result<Option<String>> {
+        let now = error_policy::now_ms();
+        let journal = self.journal()?;
+        let mut pending: Vec<_> = journal
+            .jobs
+            .values()
+            .filter(|job| {
+                matches!(
+                    job.status,
+                    OperationStatus::Queued | OperationStatus::Running
+                )
+            })
+            .collect();
+        pending.sort_by_key(|job| job.sequence);
+        let mut waiting = BTreeSet::new();
+        for job in pending {
+            let owner = &job.job.owner.user_id;
+            if waiting.contains(owner) {
+                continue;
+            }
+            if job.retry.as_ref().is_some_and(|r| r.next_attempt_ms > now) {
+                waiting.insert(owner);
+                continue;
+            }
+            return Ok(Some(job.job.operation_id.clone()));
+        }
+        Ok(None)
+    }
+
+    /// How long until the earliest backing-off job may run again.
+    fn next_retry_delay(&self) -> Result<Option<Duration>> {
+        let now = error_policy::now_ms();
         Ok(self
             .journal()?
             .jobs
@@ -3530,15 +3728,21 @@ impl Host {
                     OperationStatus::Queued | OperationStatus::Running
                 )
             })
-            .min_by_key(|job| job.sequence)
-            .map(|job| job.job.operation_id.clone()))
+            .filter_map(|job| job.retry.as_ref())
+            .map(|retry| Duration::from_millis(retry.next_attempt_ms.saturating_sub(now)))
+            .min())
     }
 
+    /// Run every job that may run now. Jobs backing off after a retryable
+    /// failure stay pending; call again (the worker does) once they are due.
     pub async fn run_pending(&self) -> Result<()> {
         // Database transactions serialize journal changes, but effects span
         // awaits. Never let two executors act on the same accepted operation.
         let _execution = self.execution.lock().await;
-        while let Some(operation_id) = self.next_pending()? {
+        while !self.stopping() {
+            let Some(operation_id) = self.next_pending()? else {
+                break;
+            };
             let boot_id = self
                 .check_host()
                 .await
@@ -3546,28 +3750,112 @@ impl Host {
             match self.run_job(&operation_id, &boot_id).await {
                 Ok(()) => {}
                 Err(error) if error.chain().any(|cause| cause.is::<Crash>()) => return Err(error),
-                Err(error) => self.block(&operation_id, &format!("{error:#}"))?,
+                Err(error) if error.chain().any(|cause| cause.is::<ShuttingDown>()) => break,
+                Err(error) => self.settle_failure(&operation_id, &error)?,
             }
         }
         Ok(())
     }
 
     pub async fn worker(&self) {
-        loop {
+        while !self.stopping() {
             if let Err(error) = self.run_pending().await {
                 eprintln!("pve-dev-host worker paused: {error:#}");
                 if error.chain().any(|cause| cause.is::<Crash>()) {
                     return;
                 }
             }
+            if self.stopping() {
+                return;
+            }
+            let idle = match self.next_retry_delay() {
+                Ok(Some(delay)) => delay.min(Duration::from_secs(30)),
+                Ok(None) | Err(_) => Duration::from_secs(30),
+            };
             tokio::select! {
                 _ = self.notify.notified() => {}
-                _ = sleep(Duration::from_secs(30)) => {}
+                _ = sleep(idle) => {}
             }
         }
     }
 
-    fn block(&self, operation_id: &str, error: &str) -> Result<()> {
+    /// Stop starting new jobs and steps. The step in flight finishes; its job
+    /// stays journaled as running and resumes on the next start.
+    pub fn request_shutdown(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
+        self.notify.notify_one();
+    }
+
+    pub fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
+    }
+
+    /// Whether any step of the job has an effect intent without verification.
+    fn intent_outstanding(&self, operation_id: &str) -> Result<bool> {
+        Ok(self
+            .journal()?
+            .jobs
+            .get(operation_id)
+            .is_some_and(|job| job.steps.iter().any(|step| step.phase == Phase::Intent)))
+    }
+
+    /// Decide what a failed job attempt means. A retryable error only stays
+    /// retryable while no effect intent is outstanding; anything unclassified
+    /// is ambiguous.
+    fn failure_class(&self, operation_id: &str, error: &anyhow::Error) -> Result<ErrorClass> {
+        Ok(match class_of(error) {
+            Some(ErrorClass::Permanent) if !self.intent_outstanding(operation_id)? => {
+                ErrorClass::Permanent
+            }
+            Some(ErrorClass::Retryable) if !self.intent_outstanding(operation_id)? => {
+                ErrorClass::Retryable
+            }
+            _ => ErrorClass::Ambiguous,
+        })
+    }
+
+    fn settle_failure(&self, operation_id: &str, error: &anyhow::Error) -> Result<()> {
+        let message = format!("{error:#}");
+        let class = self.failure_class(operation_id, error)?;
+        if class != ErrorClass::Retryable {
+            return self.block(operation_id, &message, class);
+        }
+        let policy = self.retry;
+        self.change(|journal| {
+            let job = journal
+                .jobs
+                .get_mut(operation_id)
+                .ok_or_else(|| anyhow!("operation missing"))?;
+            if job.status.is_terminal() || job.status == OperationStatus::Blocked {
+                return Ok(());
+            }
+            let now = super::store::now();
+            job.updated_at = Some(now);
+            match policy.record(job.retry.as_ref(), &job.step, error_policy::now_ms()) {
+                error_policy::RetryDecision::Retry(state) => {
+                    job.error = Some(format!(
+                        "retry {} of step {} scheduled after a transient failure: {message}",
+                        state.attempts, state.step
+                    ));
+                    job.retry = Some(state);
+                }
+                error_policy::RetryDecision::Exhausted { attempts, elapsed } => {
+                    job.status = OperationStatus::Blocked;
+                    job.error = Some(format!(
+                        "step {} kept failing transiently for {}s over {attempts} attempts; retry budget exhausted: {message}",
+                        job.step,
+                        elapsed.as_secs()
+                    ));
+                    job.failure = Some(ErrorClass::Retryable);
+                    job.retry = None;
+                    job.finished_at = Some(now);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn block(&self, operation_id: &str, error: &str, class: ErrorClass) -> Result<()> {
         self.change(|journal| {
             let job = journal
                 .jobs
@@ -3579,6 +3867,8 @@ impl Host {
             ) {
                 job.status = OperationStatus::Blocked;
                 job.error = Some(error.into());
+                job.failure = Some(class);
+                job.retry = None;
                 job.updated_at = Some(super::store::now());
                 job.finished_at = job.updated_at;
             }
@@ -3614,10 +3904,15 @@ impl Host {
             scope: self.binding.namespace(),
             managed: self.binding.managed.clone(),
         };
-        self.binding.job_plan(&record.job)?;
-        self.binding.validate_job(&record.job)?;
-        self.admit(&context)?;
+        // Validation and admission read only the frozen job and the journal:
+        // a refusal here is deterministic and cannot be cured by retrying.
+        self.binding.job_plan(&record.job).map_err(permanent)?;
+        self.binding.validate_job(&record.job).map_err(permanent)?;
+        self.admit(&context).map_err(permanent)?;
         for step in record.steps.iter().map(|record| record.step) {
+            if self.stopping() {
+                return Err(ShuttingDown.into());
+            }
             self.change(|journal| {
                 let job = journal.jobs.get_mut(operation_id).expect("running job");
                 job.step = step.name().into();
@@ -3635,6 +3930,17 @@ impl Host {
             self.run_step(&context, step)
                 .await
                 .with_context(|| format!("{} step {}", context.kind, step.name()))?;
+            if record.retry.is_some() {
+                // The step that was backing off has now succeeded.
+                self.change(|journal| {
+                    let job = journal.jobs.get_mut(operation_id).expect("running job");
+                    if job.retry.as_ref().is_some_and(|r| r.step == step.name()) {
+                        job.retry = None;
+                        job.error = None;
+                    }
+                    Ok(())
+                })?;
+            }
         }
         self.change(|journal| {
             match context.kind {
@@ -3669,6 +3975,7 @@ impl Host {
             job.status = OperationStatus::Verified;
             job.step = "complete".into();
             job.error = None;
+            job.retry = None;
             job.updated_at = Some(super::store::now());
             job.finished_at = job.updated_at;
             Ok(())
@@ -4118,8 +4425,7 @@ impl Host {
                     })?;
                     return self.verified(context, step, identity, None);
                 }
-                self.verify_effect_target(context, step).await?;
-                if let Some(identity) = self.observe(context, step).await? {
+                if let Some(identity) = self.reconcile_intent(context, step).await? {
                     return self.verified(context, step, identity, None);
                 }
                 ensure!(
@@ -4134,7 +4440,11 @@ impl Host {
         }
         self.backend.trip(step, FaultPoint::BeforeEffect)?;
         self.verify_effect_target(context, step).await?;
-        let upid = self.effect(context, step, reexecute).await?;
+        let upid = match self.run_effect(context, step, reexecute).await {
+            Ok(upid) => upid,
+            Err(error) if error.chain().any(|cause| cause.is::<Crash>()) => return Err(error),
+            Err(error) => return self.reconcile_failed_effect(context, step, error).await,
+        };
         self.backend.trip(step, FaultPoint::AfterEffect)?;
         if let Some(upid) = &upid {
             self.receipt(context, step, upid)?;
@@ -4147,6 +4457,64 @@ impl Host {
             .await?
             .ok_or_else(|| anyhow!("{} postcondition missing after its effect", step.name()))?;
         self.verified(context, step, identity, None)
+    }
+
+    /// The effect command, or a registered simulated failure in its place.
+    async fn run_effect(
+        &self,
+        context: &Context,
+        step: Step,
+        reexecute: bool,
+    ) -> Result<Option<String>> {
+        match self.backend.effect_fault(step)? {
+            None => self.effect(context, step, reexecute).await,
+            Some(fault) => {
+                if fault.applied {
+                    self.effect(context, step, reexecute).await?;
+                }
+                bail!(
+                    "simulated {} effect command failure (effect applied: {})",
+                    step.name(),
+                    fault.applied
+                )
+            }
+        }
+    }
+
+    /// Reconcile an intent that has no task receipt, exactly as after a crash:
+    /// recheck the recorded target identities, then observe the host once.
+    /// `Some` is the exact verified postcondition; `None` means it is absent.
+    async fn reconcile_intent(&self, context: &Context, step: Step) -> Result<Option<Value>> {
+        self.verify_effect_target(context, step).await?;
+        self.observe(context, step).await
+    }
+
+    /// An effect command returned an error, so whether it acted is unknown.
+    /// Treat it like a crash right after the effect: accept the step only if
+    /// the post-crash reconciliation would, and never repeat the effect.
+    async fn reconcile_failed_effect(
+        &self,
+        context: &Context,
+        step: Step,
+        error: anyhow::Error,
+    ) -> Result<()> {
+        match self.reconcile_intent(context, step).await {
+            Ok(Some(identity)) => {
+                eprintln!(
+                    "pve-dev-host: {} effect reported an error but its exact postcondition was observed; verified ({error:#})",
+                    step.name()
+                );
+                self.verified(context, step, identity, None)
+            }
+            Ok(None) => Err(ambiguous(error.context(format!(
+                "{} effect command failed and its postcondition is absent; blocked pending investigation",
+                step.name()
+            )))),
+            Err(observation) => Err(ambiguous(error.context(format!(
+                "{} effect command failed and reconciling it also failed ({observation:#}); blocked pending investigation",
+                step.name()
+            )))),
+        }
     }
 
     fn preexisting(&self, context: &Context, step: Step, identity: &Value) -> Result<bool> {
@@ -5763,11 +6131,13 @@ fn envelope(result: Result<HostResponse>) -> Envelope {
             ok: true,
             response: Some(response),
             error: None,
+            code: None,
         },
         Err(error) => Envelope {
             ok: false,
             response: None,
             error: Some(format!("{error:#}")),
+            code: HelperError::find(&error).map(|typed| typed.code),
         },
     }
 }
@@ -5833,15 +6203,32 @@ pub fn bind(socket: &Path) -> Result<UnixListener> {
 }
 
 pub async fn serve(host: Arc<Host>, socket: &Path) -> Result<()> {
+    let (_signals, never) = tokio::sync::mpsc::channel(1);
+    serve_until(host, socket, never, SHUTDOWN_GRACE).await
+}
+
+/// Serve until the first message on `signals` (SIGTERM/SIGINT in the
+/// binary), then stop starting new steps and wait up to `grace` for the step
+/// or migration effect in flight to finish. A second message exits
+/// immediately. Connections keep being served while draining, so status reads
+/// and durable submissions still work, but new migration effects are refused;
+/// accepted jobs resume on the next start.
+pub async fn serve_until(
+    host: Arc<Host>,
+    socket: &Path,
+    mut signals: tokio::sync::mpsc::Receiver<()>,
+    grace: Duration,
+) -> Result<()> {
     let listener = bind(socket)?;
     let worker = host.clone();
-    let accept = async {
+    let connections = host.clone();
+    let accept = async move {
         loop {
             let stream = match listener.accept().await {
                 Ok((stream, _)) => stream,
                 Err(error) => return anyhow::Error::from(error),
             };
-            let host = host.clone();
+            let host = connections.clone();
             tokio::spawn(async move {
                 if let Err(error) = connection(host, stream).await {
                     eprintln!("pve-dev-host connection error: {error:#}");
@@ -5849,9 +6236,39 @@ pub async fn serve(host: Arc<Host>, socket: &Path) -> Result<()> {
             });
         }
     };
+    let work = worker.worker();
+    tokio::pin!(accept, work);
     tokio::select! {
-        error = accept => Err(error.context("accepting helper connections")),
-        _ = worker.worker() => bail!("helper worker stopped"),
+        error = &mut accept => return Err(error.context("accepting helper connections")),
+        _ = &mut work => bail!("helper worker stopped"),
+        Some(()) = signals.recv() => {}
+    }
+    eprintln!(
+        "pve-dev-host stopping: no new steps start; waiting up to {}s for the step in flight (signal again to exit now)",
+        grace.as_secs()
+    );
+    host.request_shutdown();
+    // The worker's step and any migration effect both run under `execution`;
+    // holding it means no effect is in flight. New migration effects are
+    // refused once stopping, so this lock cannot be starved.
+    let drained = async {
+        (&mut work).await;
+        let _idle = host.execution.lock().await;
+    };
+    tokio::select! {
+        _ = drained => {
+            eprintln!("pve-dev-host stopped with no step or migration effect in flight");
+            Ok(())
+        }
+        _ = sleep(grace) => {
+            eprintln!("pve-dev-host stop grace expired with a step still in flight; exiting");
+            Ok(())
+        }
+        Some(()) = signals.recv() => {
+            eprintln!("pve-dev-host received a second stop signal; exiting immediately");
+            Ok(())
+        }
+        error = &mut accept => Err(error.context("accepting helper connections")),
     }
 }
 
@@ -5899,10 +6316,14 @@ pub async fn rpc(socket: &Path, request: &HostRequest) -> Result<HostResponse> {
     let envelope: Envelope =
         serde_json::from_slice(&buffer).context("invalid host helper response")?;
     if !envelope.ok {
-        bail!(
+        let message = format!(
             "host helper error: {}",
             envelope.error.unwrap_or_else(|| "unspecified".into())
         );
+        return Err(match envelope.code {
+            Some(code) => anyhow::Error::new(HelperError { code, message }),
+            None => anyhow!(message),
+        });
     }
     let response = envelope
         .response

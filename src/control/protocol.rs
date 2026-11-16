@@ -326,10 +326,13 @@ pub enum OperationStatus {
     Verified,
     Blocked,
     Cancelled,
+    /// The helper refused the job before journaling it, so no effect
+    /// happened. Terminal; the operation's claims are released.
+    Failed,
 }
 impl OperationStatus {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Verified | Self::Cancelled)
+        matches!(self, Self::Verified | Self::Cancelled | Self::Failed)
     }
 }
 

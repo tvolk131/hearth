@@ -729,7 +729,9 @@ fn systemd_units_keep_daemon_unprivileged_and_helper_local_lab_only() {
             && helper.contains("Group=pve-dev")
     );
     assert!(
-        helper.contains("KillMode=control-group") && helper.contains("StateDirectoryMode=0700")
+        helper.contains("KillMode=mixed")
+            && helper.contains("TimeoutStopSec=960s")
+            && helper.contains("StateDirectoryMode=0700")
     );
     assert!(!helper.contains("--simulate") && !helper.contains("CAP_SYS_ADMIN"));
 }

@@ -320,6 +320,8 @@ mod tests {
                     started_at: None,
                     updated_at: None,
                     finished_at: None,
+                    retry: None,
+                    failure: None,
                 },
             );
             Ok(())
