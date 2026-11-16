@@ -127,21 +127,38 @@ public struct MutationLedger: Codable, Hashable, Sendable {
 
   public mutating func recordFailure(_ id: UUID, failure: RpcFailure) {
     guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
-    entries[index].phase = failure.isDefinitiveRejection ? .rejected : .indeterminate
+    if failure.provesNotSent {
+      recordNotLaunched(id, reason: failure.detail)
+      return
+    }
+    // `attempts` already counts this attempt. A conflict on a retry can mean an
+    // earlier attempt claimed this request ID ("request_id already belongs to a
+    // different request"), so it must stay unacknowledged, never "rejected".
+    var retriedConflict = false
+    if case .server(let error) = failure, error.code == .conflict {
+      retriedConflict = entries[index].attempts > 1
+    }
+    let rejected = failure.isDefinitiveRejection && !retriedConflict
+    entries[index].phase = rejected ? .rejected : .indeterminate
     entries[index].lastErrorTitle = failure.title
-    entries[index].lastErrorDetail = failure.detail
+    entries[index].lastErrorDetail =
+      failure.detail
+      + (retriedConflict
+        ? "\nAn earlier attempt with this request ID may already have been applied. Refresh and check before discarding; a new submission could apply the change twice."
+        : "")
   }
 
   /// Only the exact queue-not-launched path may undo its provisional attempt.
   /// Earlier uncertain attempts stay uncertain and keep their request ID.
-  public mutating func recordNotLaunched(_ id: UUID) {
+  public mutating func recordNotLaunched(_ id: UUID, reason: String? = nil) {
     guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
     entries[index].phase = .indeterminate
     entries[index].attempts = max(0, entries[index].attempts - 1)
     if entries[index].attempts == 0 {
       entries[index].lastErrorTitle = "Not sent"
       entries[index].lastErrorDetail =
-        "This attempt did not launch. The original request ID is retained."
+        (reason.map { $0 + " " } ?? "This attempt did not launch. ")
+        + "The original request ID is retained."
       entries[index].lastAttemptAt = nil
     } else {
       // beginAttempt retains the previous uncertainty; do not erase its cause.

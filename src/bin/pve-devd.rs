@@ -82,13 +82,21 @@ async fn worker(store: Arc<Store>, config: ServerConfig, binding: host::HostBind
                             .is_some_and(|binding| config.binding.attested_by(binding)),
                         "host backend/scope identity changed; stopping controller worker"
                     );
-                    store.progress_detailed(
+                    // A rejected update concerns one operation only. Leave it
+                    // pending and keep serving: propagating the error would
+                    // stop the daemon, and a restart replays the same response.
+                    if let Err(error) = store.progress_detailed(
                         &record.public.operation_id,
                         response.status,
                         &response.step,
                         response.error,
                         response.progress,
-                    )?;
+                    ) {
+                        eprintln!(
+                            "controller refused helper progress for {}: {}: {}",
+                            record.public.operation_id, error.code, error.message
+                        );
+                    }
                 }
                 Err(error) => {
                     eprintln!(

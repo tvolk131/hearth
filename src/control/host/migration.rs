@@ -381,7 +381,7 @@ impl Host {
                             .any(|r| !r.phase.terminal() && r.machine_before.vm_id == vm_id),
                         "another migration retains this VM"
                     );
-                    j.schema = 6;
+                    j.schema = j.schema.max(6);
                     j.migrations.insert(id.clone(), record.clone());
                     Ok(())
                 })?;
@@ -869,7 +869,7 @@ impl Host {
                         },
                     };
                     self.change(|j| {
-                        j.schema = 6;
+                        j.schema = j.schema.max(6);
                         j.migrations.insert(migration_id.clone(), record.clone());
                         Ok(())
                     })?;
@@ -1834,7 +1834,7 @@ mod tests {
             intent: None,
         };
         host.change(|journal| {
-            journal.schema = 6;
+            journal.schema = journal.schema.max(6);
             journal.migrations.insert(id.clone(), record);
             Ok(())
         })

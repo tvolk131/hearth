@@ -15,6 +15,8 @@ The core design goal is that **nothing happens twice and nothing is silently los
 | `pve-devctl` | client | CLI for users and admins. JSON on stdout; exit 0 success, 2 rejected by server, 1 local or transport error. |
 | `pve-dev-ops` | host, root | Offline maintenance: paired backups, quarantined restores, service staging. |
 | `pve-dev-inventory` | client | Read-only discovery of existing hosts into a separate observation store. |
+| `pve-dev-expand-compute` | operator workstation | Offline: produces new quarantined state with raised compute ceilings from a backup bundle. Never touches live state or activates workers. |
+| `pve-dev-offline-shrink-reconcile` | operator workstation | Offline: produces new quarantined state reconciling an independently verified offline shrink. Never touches disks, live state or workers. |
 | `macos/` | client | SwiftUI app. Drives `pve-devctl` and never reads keys or databases itself. |
 
 There is no shared database or consensus between hosts: each host's controller is independent, and the app talks to each one directly.

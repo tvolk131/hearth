@@ -49,3 +49,38 @@ struct PersistenceSafetyTests {
         }
     }
 }
+
+extension PersistenceSafetyTests {
+    @Test func unsavedAttemptIsRecordedAsNotSent() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let profile = directory.appendingPathComponent("profile.json")
+        try Data("{}".utf8).write(to: profile)
+        let suiteName = "PveDevApp.tests.\(UUID().uuidString)"
+        let settings = SettingsStore(suiteName: suiteName)
+        defer { UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName) }
+        var configured = AppSettings(executablePath: "/usr/bin/true", profilePath: profile.path)
+        configured.servers[0].identity = ServerIdentity(serverId: String(repeating: "a", count: 64), environment: String(repeating: "b", count: 32), deviceId: String(repeating: "c", count: 64))
+        settings.save(configured)
+        // A file where the ledger directory should be makes every save fail.
+        try Data("blocked".utf8).write(to: directory.appendingPathComponent("blocked"))
+        let runner = CountingRunner()
+        let model = AppModel(
+            client: RpcClient(runner: runner), settingsStore: settings,
+            ledgerStore: LedgerStore(fileURL: directory.appendingPathComponent("blocked/pending.json")))
+        let origin = try #require(model.requestOrigin)
+        let request = RpcRequest.vmAction(VmActionRequest(requestId: UUID(), vmId: 9001, kind: .delete))
+        do {
+            _ = try await model.performMutation(request, origin: origin)
+            Issue.record("An unsaved request was sent")
+        } catch {
+            #expect(error.detail.contains("Nothing was sent"))
+        }
+        #expect(await runner.calls == 0)
+        let entry = try #require(model.ledger.entries.first)
+        #expect(entry.attempts == 0 && entry.phase == .indeterminate)
+        #expect(entry.lastErrorTitle == "Not sent")
+        #expect(entry.request == request)
+    }
+}

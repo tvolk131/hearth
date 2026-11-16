@@ -66,7 +66,7 @@ The wrapper is **not a generic exactly-once Proxmox API**. A confirmed new host 
 
 Same-boot helper crashes, unknown locks, journal corruption, external writers, imports, cancellation, delete/resize, partitions, and hard power loss remain unsupported/partially tested. The server's fsynced JSON receipts are not yet an ACID/checksummed remote operation store. Unknown ownership or inability to prove safe continuation blocks rather than guessing. Persistent verified resources that vanish are not recreated. The explicit runtime exception only permits restarting the already-owned VM after a confirmed host reboot.
 
-The legacy offline simulator remains on SQLite. The experimental real-lab journal uses redb 3.1.3. A full persistence migration and reusable environment/ownership catalog are separate work. Each lab operation is bound to its nonce, VM ID, and exact worker code hash.
+The experimental real-lab journal uses redb 3.1.3. A full persistence migration and reusable environment/ownership catalog are separate work. Each lab operation is bound to its nonce, VM ID, and exact worker code hash.
 
 ## Evidence and future PRs
 

@@ -118,6 +118,7 @@ Each mutation attempt gets a request ID once. That ID is kept until the server a
 - **Timeout, cancellation, launch or process failure, malformed output, or a server `unavailable`/`internal` error** leave the request *unacknowledged*. **Retry with Same Request ID** resends the byte-identical request. A new ID is never generated silently.
 - Submitting an identical intent again, such as double-clicking Create, reuses the pending entry instead of minting a new ID.
 - A server `forbidden`, `invalid` or `conflict` error is a definitive rejection. The entry can only be discarded. A later corrected submission gets a new ID.
+- Exception: a `conflict` on a **retry** stays unacknowledged, because the server also answers `conflict` when the request ID was already used by an earlier attempt. A request that waited too long in the shared per-device queue was never launched and is shown as *Not sent*.
 - **Discard** needs confirmation and warns that the original may already have been applied.
 - A retry is bound to the local server record, canonical profile path, public controller ID, environment ID, and public device ID. All must still match. Identical VMIDs and request UUIDs on different servers do not share busy state or ledger entries.
 - After a relaunch, requests that were in flight are shown as *outcome unknown*. **Nothing is sent automatically at launch.** Every send and retry needs an explicit click.

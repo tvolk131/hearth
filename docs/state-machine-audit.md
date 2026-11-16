@@ -65,11 +65,10 @@ Counterexample: keep a start task running after its UPID is persisted, then call
 
 ## Added validation
 
-`tests/state_machine_audit.rs` contains ten tests:
+`tests/state_machine_audit.rs` contains nine tests:
 
 - Seven targeted crash, drift and task-receipt regressions, including multiple boundaries inside each test.
 - One bounded controller/helper lifecycle model: three deterministic seeds, 96 requests per seed, repeated durable reopen, deliberately omitted helper acknowledgements, retries, create/start/stop/delete, physical inventory checks, admission limits and tombstones.
-- One legacy lock stress test: 64 independent lock/second-writer-refusal/drop/immediate-reopen cycles.
 - One forced overlapping-executor test using an explicitly stalled external task.
 
 Commands:

@@ -187,4 +187,91 @@ struct MutationLedgerTests {
     #expect(ledger.entry(entry.id)?.lastErrorDetail == after.lastErrorDetail)
   }
 
+  @Test func firstAttemptConflictIsDefinitiveRejection() throws {
+    var ledger = MutationLedger()
+    let entry = ledger.prepare(
+      createVm(), profilePath: profile, serverId: serverId, identity: identity)
+    _ = try ledger.beginAttempt(
+      entry.id, profilePath: profile, serverId: serverId, identity: identity)
+    ledger.recordFailure(
+      entry.id, failure: .server(ServerError(code: .conflict, message: "name already used")))
+    #expect(ledger.entry(entry.id)?.phase == .rejected)
+  }
+
+  @Test func conflictOnRetryStaysUnacknowledged() throws {
+    var ledger = MutationLedger()
+    let request = createVm()
+    let entry = ledger.prepare(
+      request, profilePath: profile, serverId: serverId, identity: identity)
+    _ = try ledger.beginAttempt(
+      entry.id, profilePath: profile, serverId: serverId, identity: identity)
+    ledger.recordFailure(entry.id, failure: .timedOut(seconds: 60))
+    _ = try ledger.beginAttempt(
+      entry.id, profilePath: profile, serverId: serverId, identity: identity)
+    ledger.recordFailure(
+      entry.id,
+      failure: .server(
+        ServerError(
+          code: .conflict, message: "request_id already belongs to a different request")))
+    let after = try #require(ledger.entry(entry.id))
+    #expect(after.phase == .indeterminate)
+    #expect(after.canRetry)
+    #expect(after.request == request)
+    #expect(after.lastErrorDetail?.contains("may already have been applied") == true)
+    // An identical intent still reuses the retained request ID.
+    #expect(
+      ledger.prepare(createVm(), profilePath: profile, serverId: serverId, identity: identity).id
+        == entry.id)
+  }
+
+  @Test func otherRejectionsOnRetryRemainDefinitive() throws {
+    var ledger = MutationLedger()
+    let entry = ledger.prepare(
+      createVm(), profilePath: profile, serverId: serverId, identity: identity)
+    _ = try ledger.beginAttempt(
+      entry.id, profilePath: profile, serverId: serverId, identity: identity)
+    ledger.recordFailure(entry.id, failure: .timedOut(seconds: 60))
+    _ = try ledger.beginAttempt(
+      entry.id, profilePath: profile, serverId: serverId, identity: identity)
+    ledger.recordFailure(
+      entry.id, failure: .server(ServerError(code: .forbidden, message: "not yours")))
+    #expect(ledger.entry(entry.id)?.phase == .rejected)
+  }
+
+  @Test func queueWaitTimeoutIsRecordedAsNotSent() throws {
+    var ledger = MutationLedger()
+    let entry = ledger.prepare(
+      createVm(), profilePath: profile, serverId: serverId, identity: identity)
+    _ = try ledger.beginAttempt(
+      entry.id, profilePath: profile, serverId: serverId, identity: identity)
+    ledger.recordFailure(entry.id, failure: .queueTimedOut)
+    let after = try #require(ledger.entry(entry.id))
+    #expect(after.phase == .indeterminate && after.attempts == 0)
+    #expect(after.lastErrorTitle == "Not sent")
+    #expect(after.lastErrorDetail?.contains("nothing was sent") == true)
+    #expect(after.canRetry)
+  }
+
+  @Test func queueWaitTimeoutOnRetryKeepsEarlierUncertainty() throws {
+    var ledger = MutationLedger()
+    let entry = ledger.prepare(
+      createVm(), profilePath: profile, serverId: serverId, identity: identity)
+    _ = try ledger.beginAttempt(
+      entry.id, profilePath: profile, serverId: serverId, identity: identity)
+    ledger.recordFailure(entry.id, failure: .timedOut(seconds: 60))
+    _ = try ledger.beginAttempt(
+      entry.id, profilePath: profile, serverId: serverId, identity: identity)
+    ledger.recordFailure(entry.id, failure: .queueTimedOut)
+    let after = try #require(ledger.entry(entry.id))
+    #expect(after.attempts == 1 && after.phase == .indeterminate)
+    #expect(after.lastErrorTitle == RpcFailure.timedOut(seconds: 60).title)
+  }
+
+  @Test func queueWaitTimeoutMessageDoesNotClaimAProcessRan() {
+    #expect(RpcFailure.queueTimedOut.provesNotSent)
+    #expect(!RpcFailure.timedOut(seconds: 5).provesNotSent)
+    #expect(!RpcFailure.queueTimedOut.detail.contains("terminated"))
+    #expect(RpcFailure.queueTimedOut.detail.contains("nothing was sent"))
+  }
+
 }

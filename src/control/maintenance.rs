@@ -21,13 +21,22 @@ use super::{
     transport::ServerConfig,
 };
 
-const CATALOG: TableDefinition<u8, &[u8]> = TableDefinition::new("controller_catalog_v1");
-const JOURNAL: TableDefinition<u8, &[u8]> = TableDefinition::new("host_journal_v1");
+use super::{host::JOURNAL, store::CATALOG};
 const LIMIT: u64 = 64 * 1024 * 1024;
 pub const QUARANTINE: &str = "restore-review-required";
 
-unsafe extern "C" {
-    fn geteuid() -> u32;
+/// Open a live database for export without letting redb's native recovery
+/// rewrite it. An unclean database must be examined by its own service (or the
+/// explicit schema repair path), never silently repaired by a backup.
+fn open_unrepaired(path: &Path) -> Result<Database> {
+    let mut builder = Database::builder();
+    builder.set_repair_callback(|session| session.abort());
+    builder.open(path).with_context(|| {
+        format!(
+            "opening {} without native recovery; an unclean database is not backed up",
+            path.display()
+        )
+    })
 }
 
 // Only the offline operator and root may be able to rename an output ancestor.
@@ -36,7 +45,7 @@ unsafe extern "C" {
 fn trusted_output_parent(path: &Path) -> Result<()> {
     directory(path)?;
     // SAFETY: POSIX geteuid has no arguments and no memory preconditions.
-    let uid = unsafe { geteuid() };
+    let uid = unsafe { libc::geteuid() };
     ensure!(
         fs::symlink_metadata(path)?.uid() == uid,
         "output parent must belong to the offline operator"
@@ -467,8 +476,8 @@ pub fn backup(
     let helper_db = helper.join("host-journal.redb");
     regular(&controller_db)?;
     regular(&helper_db)?;
-    let controller_lock = Database::open(&controller_db).context("controller must be stopped")?;
-    let helper_lock = Database::open(&helper_db).context("helper must be stopped")?;
+    let controller_lock = open_unrepaired(&controller_db).context("controller must be stopped")?;
+    let helper_lock = open_unrepaired(&helper_db).context("helper must be stopped")?;
     ensure!(
         read(&controller.join("initialized"))? == b"controller-v1\n",
         "controller initialization incomplete"

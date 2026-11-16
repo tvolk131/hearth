@@ -53,7 +53,12 @@ pub const MIB: u64 = 1024 * 1024;
 
 const JOURNAL_FILE: &str = "host-journal.redb";
 const SENTINEL_FILE: &str = "initialized";
-const JOURNAL: TableDefinition<u8, &[u8]> = TableDefinition::new("host_journal_v1");
+pub(crate) const JOURNAL: TableDefinition<u8, &[u8]> = TableDefinition::new("host_journal_v1");
+/// Proxmox-side limit for a graceful guest shutdown task.
+const GUEST_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(600);
+/// Extra time the foreground `pvesh` gets beyond the guest limit, so the task
+/// reports its own outcome instead of being killed mid-flight.
+const GUEST_SHUTDOWN_MARGIN: Duration = Duration::from_secs(120);
 const SAFE_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 const MANAGED_DEVICES: [&str; 2] = ["ide2", "scsi0"];
 const DEVICE_PREFIXES: [&str; 16] = [
@@ -1516,6 +1521,16 @@ impl LabBackend {
     }
 
     async fn run(&self, program: &str, arguments: Vec<String>) -> Result<String> {
+        self.run_bounded(program, arguments, self.command_timeout)
+            .await
+    }
+
+    async fn run_bounded(
+        &self,
+        program: &str,
+        arguments: Vec<String>,
+        limit: Duration,
+    ) -> Result<String> {
         let mut command = tokio::process::Command::new(program);
         command
             .args(&arguments)
@@ -1530,7 +1545,7 @@ impl LabBackend {
         let child = command
             .spawn()
             .with_context(|| format!("spawning {program}"))?;
-        let output = timeout(self.command_timeout, child.wait_with_output())
+        let output = timeout(limit, child.wait_with_output())
             .await
             .map_err(|_| {
                 anyhow!(
@@ -1561,6 +1576,17 @@ impl LabBackend {
         path: &str,
         arguments: &[(&str, String)],
     ) -> Result<String> {
+        self.pvesh_bounded(method, path, arguments, self.command_timeout)
+            .await
+    }
+
+    async fn pvesh_bounded(
+        &self,
+        method: &str,
+        path: &str,
+        arguments: &[(&str, String)],
+        limit: Duration,
+    ) -> Result<String> {
         ensure!(safe_path(path), "refusing unsafe API path {path:?}");
         let mut argv = vec![method.to_string(), path.to_string()];
         for (key, value) in arguments {
@@ -1583,7 +1609,7 @@ impl LabBackend {
         }
         argv.push("--output-format".into());
         argv.push("json".into());
-        self.run("pvesh", argv).await
+        self.run_bounded("pvesh", argv, limit).await
     }
 
     async fn zfs(&self, arguments: &[&str]) -> Result<String> {
@@ -2143,6 +2169,27 @@ impl Backend {
             Backend::Simulated(world) => {
                 world.edit(|world| world.api_task(method, path, arguments))
             }
+        }
+    }
+
+    /// Like `api_task`, but never kills the foreground `pvesh` before
+    /// `minimum` elapses. Use it when the task carries its own Proxmox-side
+    /// timeout: killing `pvesh` first turns a clean outcome into an
+    /// uncertain one.
+    async fn api_task_at_least(
+        &self,
+        method: &str,
+        path: &str,
+        arguments: &[(&str, String)],
+        minimum: Duration,
+    ) -> Result<String> {
+        match self {
+            Backend::Lab(lab) => parse_task_on(
+                &lab.pvesh_bounded(method, path, arguments, lab.command_timeout.max(minimum))
+                    .await?,
+                self.node(),
+            ),
+            Backend::Simulated(_) => self.api_task(method, path, arguments).await,
         }
     }
 
@@ -2749,11 +2796,16 @@ fn response(binding: &HostBinding, job: &HostJob) -> HostResponse {
         migration: None,
         enrollment: None,
         inspection: None,
+        // Wall-clock milestones come from separate `now()` reads, so a clock
+        // step backward can record `updated_at < started_at`. Report a
+        // monotonic view; the controller rejects out-of-order milestones.
         progress: job
             .updated_at
             .map(|updated_at| super::protocol::OperationProgress {
                 started_at: job.started_at,
-                updated_at,
+                updated_at: updated_at
+                    .max(job.started_at.unwrap_or(0))
+                    .max(job.finished_at.unwrap_or(0)),
                 finished_at: job.finished_at,
                 completed_steps: job
                     .steps
@@ -3060,6 +3112,9 @@ impl Host {
                 serde_json::from_slice(bytes.value())?
             };
             result = action(&mut journal)?;
+            // `journal()` refuses an out-of-scope journal, so committing one
+            // would wedge every later read. Refuse the write instead.
+            validate_scope(&journal).context("refusing to commit an invalid helper journal")?;
             let bytes = serde_json::to_vec(&journal)?;
             table.insert(0, bytes.as_slice())?;
         }
@@ -3368,10 +3423,12 @@ impl Host {
     }
 
     pub fn submit(&self, job: Job) -> Result<HostResponse> {
-        self.binding.validate_job(&job)?;
         let digest = fingerprint(&job)?;
 
         self.change(|journal| {
+            // Deduplicate before validating: an identical resubmission of an
+            // accepted job must return its stored outcome, even if a newer
+            // build validates new jobs more strictly.
             if let Some(existing) = journal.jobs.get(&job.operation_id) {
                 ensure!(
                     existing.fingerprint == digest,
@@ -3380,6 +3437,7 @@ impl Host {
                 );
                 return Ok(response(&self.binding, existing));
             }
+            self.binding.validate_job(&job)?;
             ensure!(
                 valid_operation_id(&job.operation_id),
                 "invalid operation identifier"
@@ -4792,10 +4850,11 @@ impl Host {
             )),
             Step::Shutdown => Ok(Some(
                 self.backend
-                    .api_task(
+                    .api_task_at_least(
                         "create",
                         &format!("{}/status/shutdown", context.vm_path()),
-                        &[("timeout", "600".into())],
+                        &[("timeout", GUEST_SHUTDOWN_TIMEOUT.as_secs().to_string())],
+                        GUEST_SHUTDOWN_TIMEOUT + GUEST_SHUTDOWN_MARGIN,
                     )
                     .await?,
             )),

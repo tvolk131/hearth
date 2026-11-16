@@ -370,6 +370,13 @@ impl Host {
                 }
             }
             r.phase=Phase::Verified;r.identity=Some(outcome);r.boot_id=Some(context.boot_id.clone());
+            // Recover is this job's only step, so settle the recovery job in
+            // the same transaction. Left Running across a crash, admission
+            // would count it as unsettled work and re-block the original.
+            let own=j.jobs.get_mut(&context.operation_id).context("recovery job missing")?;
+            ensure!(own.steps.len()==1,"recovery job must have exactly one step");
+            own.status=OperationStatus::Verified;own.step="complete".into();own.error=None;
+            own.finished_at=Some(super::super::store::now());
             Ok(())
         })?;
         self.backend.trip(step, FaultPoint::AfterReceipt)?;

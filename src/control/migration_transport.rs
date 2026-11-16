@@ -619,7 +619,11 @@ impl Service {
                         plan_sha256: digest(&record.plan),
                         handoff_sha256: digest(&handoff.value),
                         destination: self.public_peer(),
-                        accepted_at: now(),
+                        // `committed_at` is the source's clock. Acceptance
+                        // must not precede it, so a destination clock that
+                        // runs behind cannot make the receipt unacceptable
+                        // after the target has already been activated.
+                        accepted_at: now().max(handoff.value.committed_at),
                     },
                     &self.identity,
                     "accepted",

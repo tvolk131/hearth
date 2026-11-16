@@ -89,6 +89,32 @@ fn create(request_id: &str, name: &str, owner: Option<&str>) -> Request {
 }
 
 #[test]
+fn read_only_requests_do_not_rewrite_the_catalog() {
+    let (_directory, store, admin) = setup();
+    let frank = person(&store, &admin, "frank");
+    let before = serde_json::to_vec(&store.read().unwrap()).unwrap();
+    for peer in [&admin, &frank] {
+        for request in [
+            Request::Dashboard {},
+            Request::Whoami {},
+            Request::Budget {},
+            Request::ListVms {},
+            Request::ListOperations {},
+        ] {
+            store.handle(peer, request).unwrap();
+        }
+    }
+    let after = serde_json::to_vec(&store.read().unwrap()).unwrap();
+    assert_eq!(before, after, "a read-only request changed the catalog");
+    // A mutation still commits and advances the revision.
+    let revision = store.read().unwrap().revision;
+    store
+        .handle(&frank, create("after-reads", "dev-frank", None))
+        .unwrap();
+    assert_eq!(store.read().unwrap().revision, revision + 1);
+}
+
+#[test]
 fn authorization_is_derived_from_authenticated_device_not_request_owner() {
     let (_directory, store, admin) = setup();
     let frank = person(&store, &admin, "frank");

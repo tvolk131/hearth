@@ -262,8 +262,14 @@ private struct FleetVmActionSheet: View {
           origin: action.origin)
         dismiss()
       } catch {
+        // Rejections are final and configuration errors explain themselves;
+        // only an unknown or unsent outcome can be retried with the same ID.
+        var retryable = !error.isDefinitiveRejection
+        if case .configuration = error { retryable = false }
         failure =
-          "\(error.detail) Review Pending Requests on \(action.row.serverName); retry there using the same request ID."
+          retryable
+          ? "\(error.detail) Review Pending Requests on \(action.row.serverName); retry there using the same request ID."
+          : "\(error.title): \(error.detail)"
       }
     }
   }
