@@ -50,26 +50,6 @@ extension AppModel {
         result[server.id] = dashboard(forServer: server.id)
       })
   }
-  /// A fleet Start requires affirmative, recent observations from every peer.
-  /// Independent controllers cannot provide a distributed exclusion lock.
-  func startIssue(vm: Vm, on serverId: UUID, now: Date = Date()) -> String? {
-    for peer in settings.servers where !peer.isReadOnly && peer.id != serverId {
-      guard let session = sessions[peer.id], let dashboard = session.dashboard,
-        session.refreshFailure == nil, !session.isRefreshing,
-        let captured = session.lastRefreshedAt, now.timeIntervalSince(captured) <= 60
-      else {
-        return
-          "Cannot verify that no same-named VM is active on \(peer.name). Refresh that server first."
-      }
-      if dashboard.vms.contains(where: {
-        $0.name == vm.name && ![.stopped, .deleted].contains($0.state)
-      }) {
-        return
-          "A same-named VM is active on \(peer.name). Shut it down and refresh both servers before starting this copy."
-      }
-    }
-    return nil
-  }
   func actionIssue(for row: FleetVm, kind: VmActionKind, origin: MutationOrigin) -> String? {
     guard origin == self.origin(forServer: row.serverId) else {
       return "The server profile changed. Close and reopen this action."

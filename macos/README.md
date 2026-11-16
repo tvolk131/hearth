@@ -23,6 +23,12 @@ PveDevApp is a native SwiftUI frontend (macOS 14+) over the Rust `pve-devctl` CL
 | `Sources/PveDevCore/FormDrafts.swift`, `Permissions.swift`, `SafeText.swift` | Form validation, visibility rules, display sanitising |
 | `Sources/PveDevCore/DisplayVocabulary.swift` | Canonical display strings for wire values (Owner, Needs investigation, Completed, transfer phases) |
 | `Sources/PveDevApp/*` | SwiftUI app: sidebar, Servers home, VMs, Operations, Pending Requests, Users, Devices, Settings |
+| `Sources/PveDevApp/AppModel.swift` | The environment object pages use; composes the parts below and forwards to them |
+| `Sources/PveDevApp/ServerRegistry.swift` | Settings, per-server sessions, selection, profile trust and each server's route identity (`MutationOrigin`) |
+| `Sources/PveDevApp/ServerRoutes.swift` | Route checks and read-only queries bound to a captured route, including the same-named VM Start check |
+| `Sources/PveDevApp/RefreshCoordinator.swift` | Dashboards, administrator hardware inventory, image catalogs and per-server auto-refresh |
+| `Sources/PveDevApp/MutationCoordinator.swift` | The pending-request ledger and the one send path every change takes, awaited or not |
+| `Sources/PveDevApp/NoticeCenter.swift` | Transient notices bound to the server identity they describe |
 | `Tests/PveDevCoreTests/*` | Swift Testing suites |
 
 ## Build, test, run
