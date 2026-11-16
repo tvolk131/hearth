@@ -1061,8 +1061,7 @@ impl Service {
                         if !r.phase.terminal() {
                             r.error = Some(error.to_string());
                             r.updated_at = now();
-                            if error.to_string().contains("ambiguous") && r.phase != Phase::Cleaning
-                            {
+                            if blocks_transfer(&error, r.phase, r.handoff.is_some()) {
                                 r.phase = Phase::Blocked;
                             }
                         }
@@ -1132,6 +1131,22 @@ impl Service {
         self.endpoint.close().await;
         Ok(())
     }
+}
+
+/// Whether a coordination failure must stop a transfer for an administrator.
+///
+/// Only this controller's own helper can say an outcome is ambiguous, and it
+/// does so with a typed code ([`host::HelperErrorCode::Ambiguous`]). Message
+/// text never decides: a peer's error is relayed as text, so it can never
+/// block this endpoint. A transfer whose ownership handoff is already
+/// committed is never blocked; it keeps retrying until it settles.
+pub fn blocks_transfer(error: &anyhow::Error, phase: Phase, handoff_committed: bool) -> bool {
+    host::HelperError::has_code(error, host::HelperErrorCode::Ambiguous)
+        && !handoff_committed
+        && !matches!(
+            phase,
+            Phase::Cleaning | Phase::Relinquished | Phase::Accepted | Phase::Complete
+        )
 }
 
 pub fn target_create_id(id: &str) -> String {

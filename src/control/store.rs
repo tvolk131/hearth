@@ -1298,7 +1298,7 @@ impl Store {
     ) -> Result<(), ApiError> {
         self.change(|catalog| {
             let record = catalog.operations.get_mut(operation_id).ok_or_else(|| failure("internal", "operation missing"))?;
-            if matches!(record.public.status, OperationStatus::Verified | OperationStatus::Blocked | OperationStatus::Cancelled) { return Ok(()); }
+            if matches!(record.public.status, OperationStatus::Verified | OperationStatus::Blocked | OperationStatus::Cancelled | OperationStatus::Failed) { return Ok(()); }
             record.public.status = status.clone();
             record.public.step = step.into();
             record.public.error = error.clone();

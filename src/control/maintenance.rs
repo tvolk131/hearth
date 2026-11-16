@@ -307,7 +307,10 @@ fn validate(payload: &Payload, pins: &Pins) -> Result<()> {
             );
             if matches!(
                 operation.public.status,
-                OperationStatus::Verified | OperationStatus::Blocked | OperationStatus::Cancelled
+                OperationStatus::Verified
+                    | OperationStatus::Blocked
+                    | OperationStatus::Cancelled
+                    | OperationStatus::Failed
             ) {
                 ensure!(
                     operation.public.status == job.status,
@@ -315,8 +318,13 @@ fn validate(payload: &Payload, pins: &Pins) -> Result<()> {
                 );
             }
         } else {
+            // A helper rejection is the one terminal outcome without a helper
+            // record: the job was refused before it was journaled.
             ensure!(
-                operation.public.status == OperationStatus::Queued,
+                matches!(
+                    operation.public.status,
+                    OperationStatus::Queued | OperationStatus::Failed
+                ),
                 "controller operation has progress without helper evidence (stale pair)"
             );
         }
@@ -1071,6 +1079,8 @@ mod managed_backup_tests {
                 started_at: None,
                 updated_at: None,
                 finished_at: None,
+                retry: None,
+                failure: None,
             },
         );
         source.payload.journal.sequence = 1;

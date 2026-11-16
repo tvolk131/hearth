@@ -488,6 +488,8 @@ mod tests {
             started_at: Some(1),
             updated_at: Some(2),
             finished_at: Some(2),
+            retry: None,
+            failure: None,
         }
     }
     fn write_private(path: &Path, value: &[u8]) {
@@ -655,6 +657,8 @@ mod tests {
                 poll_interval: Duration::from_millis(1),
                 notify: Notify::new(),
                 execution: tokio::sync::Mutex::new(()),
+                retry: Default::default(),
+                stopping: Default::default(),
             }
         }
         fn edit(&self, change: impl FnOnce(&mut Journal)) {

@@ -162,11 +162,12 @@ impl Host {
         effect: impl Future<Output = Result<Value>>,
     ) -> Result<Value> {
         self.migration_change(id, |_, record| {
-            ensure!(
-                record.intent.is_none(),
-                "ambiguous target seal intent; inspect retained staging without replay; original failure: {}",
-                record.error.as_deref().unwrap_or("completion unknown")
-            );
+            if record.intent.is_some() {
+                return Err(HelperError::ambiguous(format!(
+                    "ambiguous target seal intent; inspect retained staging without replay; original failure: {}",
+                    record.error.as_deref().unwrap_or("completion unknown")
+                )));
+            }
             record.intent = Some("seal".into());
             Ok(())
         })?;
@@ -303,10 +304,11 @@ impl Host {
                         existing.plan == plan && existing.role == role,
                         "migration ID already belongs to another plan/role"
                     );
-                    ensure!(
-                        existing.phase != TransferPhase::Preparing,
-                        "preparation outcome is ambiguous; inspect without replay"
-                    );
+                    if existing.phase == TransferPhase::Preparing {
+                        return Err(HelperError::ambiguous(
+                            "preparation outcome is ambiguous; inspect without replay",
+                        ));
+                    }
                     return Ok(json!(existing));
                 }
                 let vm_id = if role == TransferRole::Source {
@@ -416,10 +418,11 @@ impl Host {
                         record.manifest.context("fenced source missing manifest")?
                     ));
                 }
-                ensure!(
-                    record.phase == TransferPhase::Authorized,
-                    "ambiguous fence intent cannot be replayed automatically"
-                );
+                if record.phase != TransferPhase::Authorized {
+                    return Err(HelperError::ambiguous(
+                        "ambiguous fence intent cannot be replayed automatically",
+                    ));
+                }
                 let context = self.migration_context(record.plan.source_vm_id, &migration_id)?;
                 self.migration_change(&migration_id, |_, r| {
                     r.phase = TransferPhase::Preparing;
@@ -760,10 +763,11 @@ impl Host {
                         .await?;
                     proof
                 } else {
-                    ensure!(
-                        record.phase == TransferPhase::Relinquished,
-                        "ambiguous recovery deletion cannot be blindly replayed"
-                    );
+                    if record.phase != TransferPhase::Relinquished {
+                        return Err(HelperError::ambiguous(
+                            "ambiguous recovery deletion cannot be blindly replayed",
+                        ));
+                    }
                     self.migration_change(&migration_id, |_, r| {
                         r.phase = TransferPhase::Cleaning;
                         r.intent = Some("cleanup".into());
@@ -969,13 +973,14 @@ impl Host {
                     })?;
                     return Ok(json!({"aborted":true,"source_restored":true}));
                 }
-                ensure!(
-                    matches!(
-                        record.phase,
-                        TransferPhase::Fenced | TransferPhase::Receiving | TransferPhase::Ready
-                    ),
-                    "ambiguous preparation needs explicit inspection before abort"
-                );
+                if !matches!(
+                    record.phase,
+                    TransferPhase::Fenced | TransferPhase::Receiving | TransferPhase::Ready
+                ) {
+                    return Err(HelperError::ambiguous(
+                        "ambiguous preparation needs explicit inspection before abort",
+                    ));
+                }
                 self.migration_change(&migration_id, |_, r| {
                     r.phase = TransferPhase::Cleaning;
                     r.intent = Some("abort".into());

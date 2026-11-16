@@ -107,6 +107,8 @@ pub fn validate_catalog(c: &super::store::Catalog) -> anyhow::Result<()> {
             c.disk_shrinks
                 .values()
                 .any(|s| s.operation_id == record.public.operation_id)
+                // Rejected before the helper journaled it: no workspace exists.
+                || record.public.status == OperationStatus::Failed
                 || (record.public.status == OperationStatus::Cancelled && c.operations.values().any(|r| {
                     r.public.status == OperationStatus::Verified && matches!(r.job.extension.as_deref(),Some(super::vm_change::JobExtension::Recover(s)) if s.operation_id == record.public.operation_id && s.kind == super::vm_change::RecoveryKind::AbortPreparation)
                 }))

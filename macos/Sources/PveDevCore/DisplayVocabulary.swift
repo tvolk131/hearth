@@ -29,6 +29,7 @@ public enum DisplayVocabulary {
         case .verified: completed
         case .blocked: needsInvestigation
         case .cancelled: "Cancelled"
+        case .failed: "Failed"
         default: readable(status.rawValue)
         }
     }

@@ -51,6 +51,7 @@ struct OperationStatusBadge: View {
     case .verified: Pill(text: text, color: .green, systemImage: "checkmark.seal.fill")
     case .blocked: Pill(text: text, color: .red, systemImage: "exclamationmark.octagon.fill")
     case .cancelled: Pill(text: text, color: .secondary, systemImage: "xmark.circle")
+    case .failed: Pill(text: text, color: .orange, systemImage: "xmark.octagon")
     default: Pill(text: text, color: .purple, systemImage: "questionmark")
     }
   }

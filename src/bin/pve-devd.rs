@@ -99,10 +99,22 @@ async fn worker(store: Arc<Store>, config: ServerConfig, binding: host::HostBind
                     }
                 }
                 Err(error) => {
-                    eprintln!(
-                        "host helper unavailable for {}: {error:#}",
-                        record.public.operation_id
-                    );
+                    match store.settle_submit_error(&record.public.operation_id, &error) {
+                        Ok(true) => eprintln!(
+                            "host helper rejected {}; marked failed: {error:#}",
+                            record.public.operation_id
+                        ),
+                        // Transport and other untyped failures say nothing about
+                        // the job; keep it queued and resubmit.
+                        Ok(false) => eprintln!(
+                            "host helper unavailable for {}: {error:#}",
+                            record.public.operation_id
+                        ),
+                        Err(refused) => eprintln!(
+                            "controller could not settle rejected {}: {}: {}",
+                            record.public.operation_id, refused.code, refused.message
+                        ),
+                    }
                 }
             }
         }
