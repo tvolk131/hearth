@@ -14,6 +14,11 @@ struct FleetVm: Identifiable {
   func confirmationRequired(for kind: VmActionKind) -> String? {
     kind == .delete || (kind == .stop && existing) ? qualifiedName : nil
   }
+  /// Start is the only action sent straight from the menu, and only while no
+  /// same-named VM is running elsewhere: two copies would serve the same things.
+  func sendsWithoutReview(_ kind: VmActionKind) -> Bool {
+    kind == .start && runningDuplicates.isEmpty
+  }
   static func build(servers: [ServerProfile], dashboards: [UUID: DashboardResult]) -> [FleetVm] {
     let rows = servers.filter { !$0.isReadOnly }.flatMap { server in
       // Imported records are listed separately, outside the actionable table.

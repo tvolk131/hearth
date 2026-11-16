@@ -208,10 +208,19 @@ struct FleetVirtualMachinesView: View {
         Menu("Actions") {
           ForEach(power, id: \.self) { kind in
             let issue = model.actionIssue(for: row, kind: kind, origin: origin)
+            let direct = row.sendsWithoutReview(kind)
             Button {
-              action = FleetVmAction(row: row, origin: origin, kind: kind)
+              if direct {
+                model.submit(
+                  .vmAction(VmActionRequest(requestId: UUID(), vmId: row.vmId, kind: kind)),
+                  origin: origin)
+              } else {
+                action = FleetVmAction(row: row, origin: origin, kind: kind)
+              }
             } label: {
-              Text(kind == .shutdown ? "Shut Down…" : kind.rawValue.capitalized + "…")
+              Text(
+                (kind == .shutdown ? "Shut Down" : kind.rawValue.capitalized)
+                  + (direct ? "" : "…"))
               if let issue { Text(issue) }
             }
             .disabled(issue != nil)
