@@ -1,4 +1,5 @@
 import json
+import os
 import hashlib
 import pathlib
 import re
@@ -276,9 +277,11 @@ def run(lab, timeout, linux_bin_dir, bootable=False, shrink=False, shrink_prepar
         return output
 
     def invoke(name, request, expected=None):
-        output = subprocess.run([str(client), "--profile", str(profiles[name]), "rpc"], input=json.dumps(request), capture_output=True, text=True, timeout=45)
+        output = subprocess.run([str(client), "--profile", str(profiles[name]), "rpc"], input=json.dumps(request), capture_output=True, text=True, timeout=45,
+                                env=dict(os.environ, RUST_LOG="iroh=debug,noq=info"))
         if not output.stdout:
-            raise RuntimeError(f"iroh client failed: {output.stderr}")
+            (evidence / f"client-failure-{name}.log").write_text(output.stderr)
+            raise RuntimeError(f"iroh client failed: {output.stderr.strip().splitlines()[-1] if output.stderr.strip() else 'no output'}")
         response = json.loads(output.stdout)
         if expected:
             if response.get("ok") or response.get("error", {}).get("code") != expected:
@@ -383,6 +386,7 @@ User=pve-dev
 Group=pve-dev
 UMask=0077
 ExecStart=/usr/local/bin/hearthd serve --data-dir /var/lib/pve-dev/controller
+Environment=RUST_LOG=iroh=debug,noq=info
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
@@ -541,7 +545,7 @@ WantedBy=multi-user.target
                     # The controller logs a timed-out connection when its own
                     # 30-second deadline passes, a few seconds after the client's.
                     time.sleep(8)
-                diagnostics = lab.ssh(directory, "uptime; cat /proc/pressure/cpu /proc/pressure/io /proc/pressure/memory; top -b -n 1 | head -25; pveversion --verbose; zpool status; zfs list -Hp -t all -o name,used,available; journalctl --no-pager -o short-precise -n 400 -u pve-dev-controller -u pve-dev-host", capture_output=True, text=True, timeout=180)
+                diagnostics = lab.ssh(directory, "uptime; cat /proc/pressure/cpu /proc/pressure/io /proc/pressure/memory; top -b -n 1 | head -25; pveversion --verbose; zpool status; zfs list -Hp -t all -o name,used,available; ss -uanp; journalctl --no-pager -o short-precise -n 5000 -u pve-dev-controller -u pve-dev-host", capture_output=True, text=True, timeout=180)
                 (evidence / "diagnostics.log").write_text(diagnostics.stdout + diagnostics.stderr)
                 lab.ssh(directory, "systemctl stop pve-dev-controller.service pve-dev-host.service; for vmid in $(qm list | awk 'NR>1 {print $1}'); do if test \"$vmid\" -ge 9001 && test \"$vmid\" -le 9099; then qm stop \"$vmid\"; fi; done", capture_output=True, text=True, timeout=180)
             except (OSError, subprocess.TimeoutExpired) as error:
