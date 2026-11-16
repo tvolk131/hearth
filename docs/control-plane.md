@@ -1,6 +1,8 @@
 # Experimental control plane
 
-This is an executable prototype, not a production installation. It never connects to the Hetzner server automatically. The real mutation adapter accepts only the authenticated disposable `pve-lab` environment, `labpool`, and VM IDs 9001–9099. Tiny lab policy limits intentionally prevent applying the real 1.5 TiB user allocations.
+This is an experimental control plane, not a production-qualified installation. It never connects to a Proxmox host automatically. The helper has three real backends, each bound to an explicit root-owned configuration: the disposable `lab` backend described here (only the authenticated `pve-lab` environment, `labpool`, and VM IDs 9001–9099, with tiny lab policy limits), the scoped `physical_trial` backend ([physical-trial-backend.md](physical-trial-backend.md)) and the `managed` backend for real hosts ([persistent-management.md](persistent-management.md)). A simulated backend serves local tests.
+
+The project history, including dated validation runs, is in [CHANGELOG.md](../CHANGELOG.md).
 
 ## Components and authority
 
@@ -46,12 +48,12 @@ Do not delete or reinitialize either database to clear a blocked operation. Loss
 - Each VM receives a thick root zvol and a cloud-init zvol. Admission charges root size plus cloud-init and metadata allowance. Per-user VM counts and aggregate CPU/RAM allocations include all non-deleted machines, conservatively including stopped machines.
 - Minimum memory admission is bounded per user and globally; maximum configured memory is bounded per user. Proxmox receives VM memory/balloon settings. Guest ballooning is not a guarantee against host memory pressure; production needs operating headroom, ZFS ARC policy and pressure monitoring.
 - CPU cores and `cpuunits` are set per VM. The prototype does not implement a per-person cgroup CPU scheduler, so many VMs can receive more total weight than one VM. CPU sharing is not strict per-user aggregate fairness.
-- Administrator-only offline shrink for supported image guests and a distinct graceful shutdown action are documented in `disk-shrink.md`. Shrink retains the original and its workspace claim until explicit guest verification and recovery removal; it never contracts the user budget automatically. General disk growth, snapshots, clones and automatic drift repair are not exposed. The default create flow retains blank root disks. An opt-in `guest` specification selects a distinct durable pinned-image import flow with owner SSH/cloud-init on a harness-provisioned isolated bridge; see `bootable-guests.md`. Both flows leave VMs initially stopped. A running status alone is not OS/SSH readiness.
+- Administrator-only offline shrink for supported image guests and a distinct graceful shutdown action are documented in `disk-shrink.md`. Shrink retains the original and its workspace claim until explicit guest verification and recovery removal; it never contracts the user budget automatically. Offline disk expansion exists only under explicitly scoped configurations ([maintenance-features.md](maintenance-features.md)); snapshots, clones and automatic drift repair are not exposed. The default create flow retains blank root disks. An opt-in `guest` specification selects a distinct durable pinned-image import flow with owner SSH/cloud-init on a harness-provisioned isolated bridge; see `bootable-guests.md`. Both flows leave VMs initially stopped. A running status alone is not OS/SSH readiness.
 - VM state in the catalog is the last verified operation outcome, not a continuous live inventory. Out-of-band changes are checked before mutations but are not continuously reflected in the dashboard.
 
 ## Commands
 
-Build from this directory with `cargo build --locked --bins`, or from the parent with `nix develop ./pve-dev/nix --command cargo build --manifest-path pve-dev/Cargo.toml --locked --bins`. Use the small `nix/` flake path rather than snapshotting the project directory and its virtual disks into Nix.
+Build from the repository root with `cargo build --locked --bins`, or with `nix develop ./nix --command cargo build --locked --bins`. Use the small `nix/` flake path rather than snapshotting the project directory and its virtual disks into Nix.
 
 ```sh
 export PATH="$PWD/target/debug:$PATH"
@@ -95,8 +97,6 @@ The process suite starts real local daemon/helper/client processes with a simula
 
 To try the GUI without a hypervisor, add `--serve` to the process suite. It prints the CLI executable and temporary administrator profile paths and keeps the simulated services alive until Ctrl-C. In another terminal, run `cd macos && /usr/bin/swift run PveDevApp`, then select those paths in Settings and refresh. This does not start QEMU or contact any Proxmox server. Closing the demo invalidates its profiles and deletes its temporary keys/state; it is not a persistent management environment.
 
-A local UI smoke check on 2026-11-10 reproduced and fixed an oversized VM-page layout that moved both table content and sidebar navigation outside the window. The native table is now bounded by the detail area's actual size. Dashboard loading, all sidebar destinations, returning to VMs, sorting/filter controls, window zoom, and opening/cancelling the New VM sheet were checked on macOS 26.6.2 against the simulated backend. No mutations were submitted. Debug/release builds and the Swift suite passed; its opt-in Rust CLI integration test was skipped in this rerun. This is local smoke coverage, not a complete visual or interaction audit.
-
 For the real disposable Proxmox adapter:
 
 ```sh
@@ -105,72 +105,12 @@ nix develop ./nix --command python3 lab/lab.py control-test \
   --linux-bin-dir target/x86_64-unknown-linux-musl/release --timeout 1800
 ```
 
-Both macOS and Linux produce static musl binaries at that same path, avoiding Nix dynamic-loader paths that would not exist inside the Proxmox guest. The build requires Rustup's 1.99.1 toolchain and its `x86_64-unknown-linux-musl` target (`rustup toolchain install 1.99.1 --profile minimal --target x86_64-unknown-linux-musl`), Zig and cargo-zigbuild. The Rust toolchain/target are already installed on this Mac; Zig and cargo-zigbuild come from the Nix shell. No Homebrew or global QEMU installation is needed. QEMU is provided by Nix. The lab creates sparse virtual disks under `.lab/`, with a fresh root overlay and two 4 GiB mirrored ZFS disks for each run. It reuses the sealed Proxmox base image; actual disk use grows as data is written. See `lab/README.md` for base-image creation and safety boundaries.
+Both macOS and Linux produce static musl binaries at that same path, avoiding Nix dynamic-loader paths that would not exist inside the Proxmox guest. The build requires Rustup's 1.99.1 toolchain and its `x86_64-unknown-linux-musl` target (`rustup toolchain install 1.99.1 --profile minimal --target x86_64-unknown-linux-musl`), Zig and cargo-zigbuild. Zig and cargo-zigbuild come from the Nix shell. No Homebrew or global QEMU installation is needed. QEMU is provided by Nix. The lab creates sparse virtual disks under `.lab/`, with a fresh root overlay and two 4 GiB mirrored ZFS disks for each run. It reuses the sealed Proxmox base image; actual disk use grows as data is written. See `lab/README.md` for base-image creation and safety boundaries.
 
 The real controller suite runs the network daemon unprivileged inside QEMU and the separate helper as root. It checks actual reservations for three users, ZFS quota rejection, ownership enforcement, create/start/stop/delete, post-acceptance daemon SIGKILL recovery, device revocation and exact VM/zvol inventories. Forwarded SSH and iroh ports bind only to host loopback. The CLI speaks real iroh across the virtual network. Successful evidence is copied to `evidence/real-controller-*/`, excluding private keys and disks; failed-run diagnostics remain in `.lab/run-controller-*/evidence/`. These tests are not evidence of production suitability or of bootable cloud-image provisioning.
 
-`.github/workflows/checks.yml` declares Linux Rust/recovery/process tests, macOS Swift-to-Rust integration, and a real Proxmox software-emulation suite on every PR. The Linux and macOS jobs run on every push and pull request; the real-Proxmox job runs nightly and on manual dispatch.
-
-## Verified local result: November 9, 2026
-
-The complete selected controller suite passed against Proxmox VE **9.2.26**, with `complete: true` and all eight integration checks in `evidence/real-controller-20261109T173920-5183e4/summary.json`. It reported 2,353.7 seconds (about 39 minutes) on this ARM Mac under single-threaded x86 software emulation, excluding final diagnostics/shutdown. The QEMU process exited successfully; no demo services or lab QEMU processes remained afterward.
-
-- Three real 128 MiB owner reservations and per-user storage entries were provisioned. Frank's two VMs shared one owner budget; a third request was refused while the second was still durably queued, with the helper deliberately paused.
-- Device-key authentication, unknown-device refusal, cross-user action/read/owner-spoofing refusals, and live device revocation passed over real iroh connections.
-- Actual Proxmox create/start/stop/delete passed, and disk admission claims were released only after verified deletion.
-- The controller was SIGKILLed after accepting an unfinished create. A new process recovered the same operation and VM ID without duplication.
-- A 256 MiB thick-zvol allocation failed within Frank's 128 MiB quota while the pool still had 3,488,788,480 bytes available. The failed probe left no volume. Final physical VM/zvol inventories matched the catalog exactly, and all three remaining VMs were stopped.
-- Fast checks passed **52 Rust tests**, **22 Python harness/safety tests**, formatting, Clippy with warnings denied and workflow lint. Separately, **57 Swift tests** passed, including actual Rust CLI/daemon integration and fail-closed handling of pending-ledger read/write failures. Debug and release Swift builds passed; the GUI was not launched or signed.
-
-Earlier disposable attempts were retained as failures, not counted as passing runs. They exposed the required root primary group for Proxmox IPC, a read-only boot-poll timeout under emulation, and an overly specific quota-error assertion. These were corrected and regression-tested before the clean full run. No production SSH/API calls, production mutations, repository publishing, or persistent service installation on this Mac occurred in this phase.
-
-## Follow-up regression results
-
-The November 9–10 follow-up fast validation passed **84 Rust tests**, formatting, Clippy with warnings denied, and workflow/shell syntax checks; the updated lab suite passed **36 Python tests**. The local process harness also passed all five checks, including daemon SIGKILL recovery, helper persistence, live revocation and real Swift-to-Rust RPC. Swift debug/release builds and **57 Swift tests** passed. These simulator/process results are separate from the real Proxmox results above and from the bootable-guest extension in `bootable-guests.md`.
-
-A later full validation attempt failed once in the unchanged legacy simulator test `exclusive_lock_blocks_a_second_writer`, at reopening state immediately after dropping the first writer. The isolated rerun and the subsequent complete `scripts/check.sh` both passed, without changing the test or lock implementation. The cause is not established; the passing rerun does not establish that this intermittent failure is resolved. Private logs are retained in `.lab/final-fast-checks.log` and `.lab/final-fast-checks-rerun.log`.
-
-The November 10 combined real-Proxmox run also passed **all eleven checks** in `evidence/real-controller-20261110T000212-44dcfa/summary.json` (`complete: true`, `nested_guest_boot_verified: true`, Proxmox 9.2.26, 3,576.5 seconds excluding final diagnostics/shutdown). In addition to the eight baseline checks above, it independently compared a pinned image with its thick root zvol, booted a real Debian guest unattended with clean cloud-init and healthy systemd, verified owner SSH/sudo and foreign-key refusal, and verified stop/delete with no guest volumes left behind. This used the explicitly documented lab-only image derivative and multithreaded emulation, not the unchanged upstream image or production guests. See `bootable-guests.md` for the image recipe, evidence, earlier failures and remaining boundaries.
+`.github/workflows/checks.yml` declares Linux Rust/recovery/process tests, macOS Swift-to-Rust integration, and a real Proxmox software-emulation suite. The Linux and macOS jobs run on every pull request and every push to `main`; the real-Proxmox job runs nightly and on manual dispatch.
 
 ## Remaining production gates
 
-Before enabling any production writes: implement explicit production environment binding and an audited transition from observations to managed resources, use normal-sized resource policies, extend lab-only image guests to reviewed production networking/SSH enrollment and image lifecycle policy, complete helper privilege/socket review and independent security review, implement audited blocked-operation reconciliation and independently reconciled restore activation, add versioned database/operation-plan upgrade migrations, and test restore plus host reboot/failure behavior. Add continuous inventory drift observation, bounded history/pagination and request rate limits. Public relay traversal, distributable app bundling/signing/notarization and actual Linux service installation/reboot are not claimed as tested. Lab systemd templates and an offline payload stager exist; they do not install or qualify a production service.
-
-## November 10–11 recovery audit and read-only host support
-
-The independent state-machine audit reproduced two high-severity recovery identity gaps and an overlapping-executor gap, all in disposable simulation. Resumed start/stop could reuse an earlier verification after VM replacement; resumed delete could destroy a newly attached foreign volume. The helper now revalidates complete recorded identities at action reconciliation/effect boundaries, checks stopped/unprotected state before destruction, and rechecks absence before releasing capacity. An async execution mutex prevents overlapping `run_pending` calls. See `state-machine-audit.md` for baseline failures, ten passing regressions/model tests and the remaining check/effect race with external administrators. This is not a formal proof or a new real-Proxmox mutation qualification.
-
-The read-only GUI path (`read-only-gui.md`) successfully collected fresh, pinned observations from both real hosts. It creates no controller resources or management authority. The controller/helper remain undeployed on those hosts. Offline paired recovery and direct-mode iroh restart/revocation are covered by focused tests and a local-process crash/export/quarantined-restore drill; cross-machine public relay/NAT behavior remains unverified. The historical legacy lock flake did not recur during bounded stress, but its cause remains unresolved.
-
-Integrated validation passed 116 Rust tests, 78 Swift tests including the real Rust CLI integration, 36 Python lab tests, four Python staging tests, both Swift build configurations, formatting, all-target Clippy with warnings denied, Python/shell syntax checks and workflow lint. The local controller process harness passed all five checks. After explicit launch approval, the isolated review app's native visual check also passed against both real hosts, with correct per-host VM placement, recovery labels and read-only controls. Evidence is in `evidence/parallel-hardening-20261111/summary.json` and `evidence/read-only-gui-20261111/native-visual-qa.md`.
-
-## November 10–11 quota and migration follow-up
-
-The lab controller, CLI and GUI now support administrator policy edits with expected-revision checks, immutable old/target policies, conservative capacity holds and an owner freeze until helper verification. Reductions cannot discard configured allocations or actual ZFS use. The helper journals quota/reservation effects separately, rechecks physical identities during recovery, and retains claims on ambiguous outcomes. Memory/CPU-only edits preserve storage properties. Zero/unlimited/removal and guest disk resizing remain unsupported. See `quota-editing.md` and `quota-state-review.md`; production host mode remains read-only and the complete new Rust quota operation still needs real-Proxmox qualification.
-
-Final integrated validation passed **137 Rust tests**, **84 Swift tests** with actual Rust RPC, **54 Python lab tests**, four offline staging tests, nine local-process checks, both Swift build configurations, formatting, all-target Clippy with warnings denied, syntax checks and workflow lint. This includes twelve quota tests with 24 crash combinations and five adversarial quota tests (four independent review cases plus a parent follow-up). Evidence is in `evidence/quota-integration-20261111/summary.json`. No new native quota-editor visual check was performed.
-
-Integration also reproduced the legacy simulator's inherited-descriptor lock-retention failure class and fixed normal-drop release without weakening live-writer exclusion. All aggregate checks pass after correcting a parallel-inheritance assumption in the new proof test. The legacy simulator has since been removed from the repository.
-
-The separate two-independent-node Proxmox spike passed a stopped toy-VM copy with byte-exact root/cloud-init disks, preserved guest identities, thick backing at both ends, target collision/repeat refusal and retained-source start refusal. Both API tokens were revoked and both owned QEMU hosts shut down. This is a conditional go for the native transfer primitive, not a migration API or production qualification. Interruption/lost-ack recovery, reboot fencing, bootable guest identity, custom snippets and the loopback API over iroh remain gates. See `migration-spike.md` for real evidence and `migration-handoff.md` for the proposed protocol and bounded executable model.
-
-
-## November 11–12 disk-shrink qualification
-
-The administrator-only controller/helper/CLI/GUI shrink flow is implemented for
-controller-created single-ext4 GPT lab guests. The fresh real-Proxmox fixture
-passed two shrink cycles (4096→2560→2048 MiB), paired service restarts, guest
-cloud-init/systemd/SSH health, unchanged guest identities and random sentinel
-data, graceful shutdown, explicit recovery deletion, real unused-quota
-contraction and orphan-free normal deletion. A completed-copy/lost-ack helper
-kill blocked without replay and preserved the original. All owned local groups
-retired without forced cleanup. See [disk-shrink.md](disk-shrink.md) and the
-report.
-
-Validation passed 174 Rust tests, 115 Python lab tests, 97 Swift tests including
-real CLI integration, 87 deployment tests and ten local process checks, plus
-formatting, Clippy and both Swift build configurations. No new native GUI visual
-check was performed. This supersedes the earlier checkpoint's unsupported
-guest-resize status only for this lab adapter. Production execution/adoption,
-Heidi's layout/workspace needs and generic blocked reconciliation remain
-unsupported; no production host or VM was changed.
+The `managed` backend ([persistent-management.md](persistent-management.md)) adds an explicit root-owned environment binding, real-sized allocations and reviewed adoption of existing VMs. Still open: reviewed networking/SSH enrollment and image lifecycle policy beyond the pinned image catalog, helper privilege/socket review and an independent security review, audited reconciliation for blocked operations other than a failed start, independently reconciled restore activation, versioned database/operation-plan upgrade migrations, and tested restore plus host reboot/failure behavior. Add continuous inventory drift observation, bounded history/pagination and request rate limits. Public relay traversal, distributable app bundling/signing/notarization and actual Linux service installation/reboot are not claimed as tested. Lab systemd templates exist in `deploy/systemd/`; they do not install or qualify a production service.

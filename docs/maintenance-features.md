@@ -36,7 +36,7 @@ Hashing, sealing, cancellation and explicit cleanup run as durable background wo
 
 ## Qualification boundaries
 
-The new isolated host harness is `deployment/six_feature_trial.py`; its reviewed plan binds runtime/source/binary hashes and offline validation before any setup. It reserves fresh VMIDs and a nonce-scoped capped dataset, independently preserves existing VM configurations/states and ZFS identities/reservations, and never reboots a physical host. Uncertain results retain only the test resources for investigation. The old automatic physical driver remains gated independently.
+Physical qualification of these features used an isolated host harness, `deployment/six_feature_trial.py`, which was never committed to this repository. Its reviewed plan bound runtime/source/binary hashes and offline validation before any setup. It reserved fresh VMIDs and a nonce-scoped capped dataset, independently preserved existing VM configurations/states and ZFS identities/reservations, and never rebooted a physical host. Uncertain results retained only the test resources for investigation. The older automatic physical driver (see [physical-trial.md](physical-trial.md)) was gated separately.
 
 Physical tests use small real guest disks. Separate admission and GPT CRC/bounds tests cover a 750 GiB profile; that is not a claim that 750 GiB was allocated, copied or resized on hardware. Simulated crash matrices, real transport tests and disposable hardware tests strengthen confidence but are not a formal proof or a physical power-loss qualification.
 

@@ -1,10 +1,14 @@
-# Offline recovery and service staging
+# Offline recovery and service templates
 
-This delivers a paired offline export, verification and **quarantined** restore
-tool, plus a reviewable Linux service payload. It does not install anything on
-either Hetzner host. The helper still accepts only its authenticated disposable
-`pve-lab`/`labpool` environment. There is no production write adapter or host
-adoption path here.
+`pve-dev-ops` provides a paired offline export, verification and **quarantined**
+restore of a stopped controller/helper pair, plus the `prepare-adoption` step
+used by the managed backend (see [persistent-management.md](persistent-management.md)).
+The repository also ships lab systemd unit templates in
+[`deploy/systemd/`](../deploy/systemd). None of this installs anything on a host
+by itself, and there is no command that activates a restored backup.
+
+Backups accept the `lab`, `physical_trial` and `managed` helper bindings, and a
+simulated backend for local tests.
 
 ## What is backed up
 
@@ -97,13 +101,18 @@ Until that exists, preserve the original disks/state, keep the restore isolated,
 and investigate; do not restart workers against physical resources from an old
 backup. There is no automatic replay/force-unblock path.
 
-## Reviewable service payload
+## Lab service templates
 
-`deployment/stage.py --bin-dir /abs/linux-x86_64-binaries --output /abs/new-stage`
-creates a new tree with four ELF binaries, two systemd units and a SHA-256 file
-manifest. It never writes `/etc`, creates accounts or starts services. Native
-macOS binaries are refused. Build the Linux artifacts using the existing
-cross-build/lab workflow, retain build provenance, then review the payload.
+`deploy/systemd/` contains two unit templates: `pve-devd.service` for the
+unprivileged controller and `pve-dev-host.service` for the root helper.
+`tests/maintenance.rs` checks the properties described below. Build the
+static Linux binaries with `scripts/build-lab-binaries.sh` (output in
+`target/x86_64-unknown-linux-musl/release`) and keep their build provenance.
+
+There is no staging or packaging tool in this repository. Earlier development
+used a separate `deployment/stage.py` script to assemble binaries, units and a
+SHA-256 manifest into a reviewable tree. That script was never committed here,
+so record the binary and unit hashes yourself before installing.
 
 The daemon uses a dedicated `pve-dev` account/group, no capabilities, private
 state, no access to home directories/devices and a restrictive systemd sandbox.
@@ -118,11 +127,14 @@ not a production packaging qualification.
 For an explicitly provisioned disposable Linux lab only, the reviewed installation
 sequence is:
 
-1. Verify the staged manifest and executable provenance; create a system
-   `pve-dev` group/account with no login shell or home. Do not grant sudo/PVE roles.
-2. Install the four binaries under root-owned `/usr/local/libexec/pve-dev/`
-   (0755), and the units under `/etc/systemd/system/` (0644). The binary directory
-   must not be writable by the daemon account.
+1. Verify the recorded binary/unit hashes and executable provenance; create a
+   system `pve-dev` group/account with no login shell or home. Do not grant
+   sudo/PVE roles.
+2. Install `pve-devd` and `pve-dev-host` (which the units run), plus
+   `pve-devctl` and `pve-dev-ops` for administration, under root-owned
+   `/usr/local/libexec/pve-dev/` (0755), and the units under
+   `/etc/systemd/system/` (0644). The binary directory must not be writable by
+   the daemon account.
 3. Create root-owned `/etc/pve-dev-host` (0700) and install the independently
    reviewed nonce/pool-GUID/image allowlist `lab.json` (0600). Preserve image
    hashes, identity and pool pins; initialization is not an upgrade operation.
@@ -157,28 +169,19 @@ loss, restrictive NAT, public discovery or relay fallback. Public mode still
 uses the iroh N0 preset, but public relay/NAT reliability is unverified. A
 cross-network matrix and a reviewed public-listener deployment are still needed.
 
-The paired backup tests cover queued accepted intents, helper-submitted work,
-deduplication, identity and revocation preservation, terminal-proof mismatch,
-active database locks, corruption, missing files, wrong pins, symlinks/hardlinks,
-private modes and direct-binary quarantine. These are separate from actual
-systemd/PVE boot tests and do not claim operational restore activation is solved.
+The paired backup tests in `tests/maintenance.rs` cover queued accepted intents,
+helper-submitted work and interrupted helper intents with their exact
+fingerprints, deduplication, identity and revocation preservation, terminal-proof
+mismatch, active database locks, corruption, missing files, wrong pins,
+symlinks/hardlinks, private modes, writable output parents and ancestors, and
+direct-binary quarantine. Schema-specific cases check that policy edits, user
+deletion, shrink holds, growth claims and partially committed profiles survive a
+quarantined restore without activating. `scripts/test-maintenance-local.py` runs
+a five-check process drill with real binaries: it kills the daemon after durable
+acceptance, exports both stopped journals, verifies the pinned bundle, checks
+that the accepted operation and VM identity are preserved, and confirms both
+restored binaries refuse to start.
 
-## Local validation, November 10, 2026
-
-All nine `cargo test --locked --test maintenance` checks passed, including real
-Direct-mode iroh. `python3 scripts/test-maintenance-local.py` also passed its
-five-check actual-process drill: it killed the daemon after durable acceptance,
-exported both stopped journals, verified the pinned bundle, preserved the same
-accepted operation/VM identity, and observed both restored binaries refuse to
-start. The simulated fixtures and processes were removed afterward.
-
-Four `python3 -B deployment/test_stage.py` checks passed for exact manifest
-coverage, non-Linux binary refusal, symlink refusal and unsafe-parent refusal.
-Those tests use synthetic ELF headers; they do not execute or qualify Linux
-binaries. Focused Clippy with warnings denied, Rust formatting, all-bin debug
-build and Python compilation passed. Socket tests ran outside the restricted
-sandbox; the initial sandbox attempt could not bind UDP (`EPERM`). The process
-drill initially used an incorrect CLI identity subcommand; it was corrected to
-the existing `identity new --path` interface before the passing run.
-
-The non-secret receipt summary is `evidence/service-recovery-20261110/summary.json`.
+These are separate from actual systemd/PVE boot tests and do not claim
+operational restore activation is solved. For the November 10, 2026 validation
+run, see [CHANGELOG.md](../CHANGELOG.md#2026-11-10).
