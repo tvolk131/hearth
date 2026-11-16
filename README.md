@@ -57,6 +57,7 @@ bash scripts/check-swift.sh
 - [`docs/state-machine-audit.md`](docs/state-machine-audit.md): adversarial recovery review and its fixes
 - [`docs/persistent-management.md`](docs/persistent-management.md): the managed backend for real hosts
 - [`docs/deployment-recovery.md`](docs/deployment-recovery.md): backups and restores
+- [`docs/storage-retention.md`](docs/storage-retention.md): storage format, migration, paging and history retention
 - Feature notes: [disk shrink](docs/disk-shrink.md), [quota editing](docs/quota-editing.md), [user deletion](docs/user-deletion.md), [stopped migration](docs/stopped-migration.md), [discovery](docs/discovery.md)
 
 Dated validation runs and project history are in [`CHANGELOG.md`](CHANGELOG.md). Some feature notes ([physical trial](docs/physical-trial.md), [migration spike](docs/migration-spike.md), [state-machine audit](docs/state-machine-audit.md)) are reports of a specific run or review and are kept as historical records.

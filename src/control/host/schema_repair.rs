@@ -646,6 +646,8 @@ mod tests {
             result
         }
         fn host(&self, database: Database, binding: HostBinding) -> Host {
+            // Host::open migrates the format-1 layout this tool repairs.
+            crate::control::persist::migrate_journal(&database).unwrap();
             Host {
                 database,
                 state_dir: self.state.clone(),
@@ -665,7 +667,8 @@ mod tests {
             let db = Database::open(self.state.join(JOURNAL_FILE)).unwrap();
             let mut j = read_journal(&db).unwrap();
             change(&mut j);
-            write_journal(&db, &j).unwrap();
+            // Edits reproduce state written by an older, format-1 binary.
+            crate::control::persist::write_legacy_journal(&db, &j).unwrap();
         }
         fn reproduce_downgrade(&self) {
             self.edit(|j| j.schema = 6);
@@ -792,7 +795,7 @@ mod tests {
         let database = Database::open(path).unwrap();
         let journal = read_journal(&database).unwrap();
         assert_eq!(journal.schema, 6);
-        write_journal(&database, &journal).unwrap();
+        crate::control::persist::write_legacy_journal(&database, &journal).unwrap();
         // Match a service terminated by SIGTERM: no Rust destructors run.
         std::process::exit(0);
     }

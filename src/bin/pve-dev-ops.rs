@@ -2,11 +2,14 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
-use pve_dev::control::maintenance::{self, Pins};
+use pve_dev::control::{
+    maintenance::{self, Pins},
+    retention::DEFAULT_RETENTION_DAYS,
+};
 
 #[derive(Parser)]
 #[command(
-    about = "Offline paired controller/helper backup and QUARANTINED restoration; never activates workers"
+    about = "Offline paired controller/helper backup, QUARANTINED restoration and history retention; never activates workers"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -72,6 +75,26 @@ enum Command {
         #[command(flatten)]
         expected: Expected,
     },
+    /// Export finished history older than the retention age to a new JSONL
+    /// archive, then prune it from the stopped controller and helper.
+    /// Non-terminal operations, anything they or retained state reference,
+    /// and every request-ID record are always kept. If interrupted, run again.
+    Prune {
+        #[arg(long)]
+        controller_dir: PathBuf,
+        #[arg(long)]
+        helper_dir: PathBuf,
+        /// New archive file to create (absolute path; must not exist).
+        #[arg(long, required_unless_present = "dry_run")]
+        archive: Option<PathBuf>,
+        /// Report what would be pruned without writing anything.
+        #[arg(long, conflicts_with = "archive")]
+        dry_run: bool,
+        #[arg(long, default_value_t = DEFAULT_RETENTION_DAYS, value_parser = clap::value_parser!(u64).range(1..=36500))]
+        older_than_days: u64,
+        #[command(flatten)]
+        expected: Expected,
+    },
     Restore {
         #[arg(long)]
         bundle: PathBuf,
@@ -122,6 +145,24 @@ enum Command {
 
 fn run() -> Result<()> {
     let receipt = match Cli::parse().command {
+        Command::Prune {
+            controller_dir,
+            helper_dir,
+            archive,
+            dry_run: _,
+            older_than_days,
+            expected,
+        } => {
+            let receipt = maintenance::prune(
+                &controller_dir,
+                &helper_dir,
+                archive.as_deref(),
+                older_than_days,
+                &expected.pins(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&receipt)?);
+            return Ok(());
+        }
         Command::PrepareAdoption {
             bundle,
             output,

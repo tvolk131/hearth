@@ -23,7 +23,9 @@ The catalog includes enrolled/revoked devices, accepted intents, deduplication
 keys, resource claims and VM tombstones. The journal includes frozen jobs,
 fingerprints, resource identities and task receipts. Validation compares actual
 frozen operation payloads, requires helper evidence for every controller
-terminal result, refuses helper jobs absent from the controller, and verifies
+terminal result, refuses helper jobs absent from the controller (except
+finished jobs whose operation was archived by `pve-dev-ops prune` and survives
+as a request-ID tombstone; see `storage-retention.md`), and verifies
 binding, server public identity and pool GUID against independent expected
 pins. A helper may legitimately be ahead of an unfinished controller operation.
 The tool does not require identical status when an acknowledgement was lost.

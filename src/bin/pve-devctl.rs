@@ -12,11 +12,12 @@ use pve_dev::control::{
         AbortReceipt, AdminRequest as MigrationRequest, Grant, MAX_GRANT_SECONDS,
         Role as MigrationRole, Signed,
     },
-    protocol::{Guest, MAX_REQUEST, MAX_RESPONSE, Request, ResourcePolicy, VmAction},
+    protocol::{Guest, MAX_REQUEST, MAX_RESPONSE, Request, ResourcePolicy, Response, VmAction},
     transport::{self, Descriptor, Profile, ProfileBinding},
     vm_change::{EnrollmentPlan, OperationInspection, RecoveryKind},
 };
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 #[derive(Parser)]
 #[command(about = "Authenticated client for the experimental pve-dev control daemon")]
@@ -118,11 +119,34 @@ enum Commands {
         #[command(subcommand)]
         command: VmCommand,
     },
+    /// List operations (all of them by default, as one array), show one, or
+    /// inspect and recover a blocked one.
     Operations {
         #[arg(long)]
         operation_id: Option<String>,
+        /// Return one page of at most this many operations, with `next_cursor`.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        limit: Option<u32>,
+        /// Continue a paged listing after this cursor.
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Fetch every page and print the operations as one array.
+        #[arg(long, conflicts_with_all = ["limit", "cursor", "operation_id"])]
+        all: bool,
         #[command(subcommand)]
         command: Option<OperationsCommand>,
+    },
+    /// Administrator: retained audit entries in sequence order, one page at a time.
+    Audit {
+        /// Return at most this many entries, with `next_cursor`.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        limit: Option<u32>,
+        /// Continue after this audit sequence number.
+        #[arg(long)]
+        cursor: Option<u64>,
+        /// Fetch every page and print the entries as one array.
+        #[arg(long, conflicts_with_all = ["limit", "cursor"])]
+        all: bool,
     },
     /// Review, authorize and track an independently controlled stopped transfer.
     Migration {
@@ -639,13 +663,25 @@ fn controller_request(command: Commands) -> Result<Request> {
             label,
         },
         Commands::RevokeDevice { endpoint_id } => Request::RevokeDevice { endpoint_id },
+        Commands::Audit { limit, cursor, .. } => Request::ListAudit { cursor, limit },
         Commands::Operations {
             operation_id,
+            limit,
+            cursor,
+            all,
             command,
         } => {
             ensure!(
                 operation_id.is_none() || command.is_none(),
                 "choose --operation-id or an operations subcommand, not both"
+            );
+            ensure!(
+                command.is_none() || (limit.is_none() && cursor.is_none() && !all),
+                "paging options apply only to listing operations"
+            );
+            ensure!(
+                operation_id.is_none() || (limit.is_none() && cursor.is_none()),
+                "paging options apply only to listing operations"
             );
             match command {
                 Some(OperationsCommand::Inspect { operation_id }) => {
@@ -679,7 +715,11 @@ fn controller_request(command: Commands) -> Result<Request> {
                 }
                 None => match operation_id {
                     Some(operation_id) => Request::GetOperation { operation_id },
-                    None => Request::ListOperations {},
+                    None if all => Request::ListOperations {
+                        cursor: None,
+                        limit: Some(PAGE_ALL),
+                    },
+                    None => Request::ListOperations { cursor, limit },
                 },
             }
         }
@@ -863,8 +903,77 @@ fn controller_request(command: Commands) -> Result<Request> {
     Ok(request)
 }
 
+/// Page size used when collecting every page.
+const PAGE_ALL: u32 = 1000;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Listing {
+    Operations,
+    Audit,
+}
+
+fn rejected(response: &Response, code: &str, message: &str) -> bool {
+    !response.ok
+        && response
+            .error
+            .as_ref()
+            .is_some_and(|e| e.code == code && e.message.contains(message))
+}
+
+/// Follows `next_cursor` from `first` (the first page) and returns every item
+/// as one array, in the same envelope a single unpaged listing uses.
+async fn collect_pages(
+    listing: Listing,
+    first: Response,
+    profile: &Profile,
+    expected: Option<&ProfileBinding>,
+) -> Result<Response> {
+    let mut response = first;
+    let mut items = Vec::new();
+    let mut pages = 0u32;
+    loop {
+        if !response.ok {
+            return Ok(response);
+        }
+        let page = response.result.take().unwrap_or_default();
+        let key = match listing {
+            Listing::Operations => "operations",
+            Listing::Audit => "entries",
+        };
+        items.extend(
+            page[key]
+                .as_array()
+                .context("controller returned a malformed page")?
+                .iter()
+                .cloned(),
+        );
+        let cursor = page.get("next_cursor").filter(|c| !c.is_null());
+        let Some(cursor) = cursor else { break };
+        pages += 1;
+        ensure!(pages < 100_000, "controller kept returning pages");
+        let request = match listing {
+            Listing::Operations => Request::ListOperations {
+                cursor: Some(
+                    cursor
+                        .as_str()
+                        .context("malformed operation cursor")?
+                        .to_owned(),
+                ),
+                limit: Some(PAGE_ALL),
+            },
+            Listing::Audit => Request::ListAudit {
+                cursor: Some(cursor.as_u64().context("malformed audit cursor")?),
+                limit: Some(PAGE_ALL),
+            },
+        };
+        response = transport::rpc_bound(profile, request, expected).await?;
+    }
+    Ok(Response::from_result(Ok(Value::Array(items))))
+}
+
 async fn run() -> Result<bool> {
     let cli = Cli::parse();
+    let listing;
     let request = match cli.command {
         Commands::ProfileInfo => {
             let path = cli
@@ -918,7 +1027,20 @@ async fn run() -> Result<bool> {
             );
             return Ok(true);
         }
-        command => controller_request(command)?,
+        command => {
+            listing = match &command {
+                Commands::Operations {
+                    operation_id: None,
+                    limit: None,
+                    cursor: None,
+                    all,
+                    command: None,
+                } => Some((Listing::Operations, *all)),
+                Commands::Audit { all: true, .. } => Some((Listing::Audit, true)),
+                _ => None,
+            };
+            controller_request(command)?
+        }
     };
     let path = cli
         .profile
@@ -937,7 +1059,45 @@ async fn run() -> Result<bool> {
         (None, None, None) => None,
         _ => anyhow::bail!("all three expected identity fields are required together"),
     };
-    let response = transport::rpc_bound(&profile, request, expected.as_ref()).await?;
+    let mut response = transport::rpc_bound(&profile, request, expected.as_ref()).await?;
+    match listing {
+        // An unpaged listing that outgrew one response, or an explicit --all:
+        // collect every page into the same single-array result.
+        Some((Listing::Operations, false))
+            if rejected(&response, "unavailable", "exceeds protocol limit") =>
+        {
+            let first = transport::rpc_bound(
+                &profile,
+                Request::ListOperations {
+                    cursor: None,
+                    limit: Some(PAGE_ALL),
+                },
+                expected.as_ref(),
+            )
+            .await?;
+            response =
+                collect_pages(Listing::Operations, first, &profile, expected.as_ref()).await?;
+        }
+        // A controller that predates paging rejects the paged form; its
+        // unpaged listing is then the whole history.
+        Some((Listing::Operations, true))
+            if rejected(&response, "invalid", "malformed or unsupported") =>
+        {
+            response = transport::rpc_bound(
+                &profile,
+                Request::ListOperations {
+                    cursor: None,
+                    limit: None,
+                },
+                expected.as_ref(),
+            )
+            .await?;
+        }
+        Some((listing, true)) => {
+            response = collect_pages(listing, response, &profile, expected.as_ref()).await?;
+        }
+        _ => {}
+    }
     println!("{}", serde_json::to_string_pretty(&response)?);
     Ok(response.ok)
 }
@@ -1049,6 +1209,38 @@ mod cli_tests {
             network: Network::Loopback,
         };
         (source_grant, destination_grant, descriptor)
+    }
+
+    #[test]
+    fn listings_page_only_when_asked_and_keep_the_unpaged_default() {
+        assert_eq!(
+            request(&["operations"]).unwrap(),
+            json!({"action":"list_operations"})
+        );
+        assert_eq!(
+            request(&["operations", "--limit", "25", "--cursor", "abc"]).unwrap(),
+            json!({"action":"list_operations","cursor":"abc","limit":25})
+        );
+        assert_eq!(
+            request(&["operations", "--all"]).unwrap(),
+            json!({"action":"list_operations","limit":1000})
+        );
+        assert_eq!(request(&["audit"]).unwrap(), json!({"action":"list_audit"}));
+        assert_eq!(
+            request(&["audit", "--cursor", "41", "--limit", "5"]).unwrap(),
+            json!({"action":"list_audit","cursor":41,"limit":5})
+        );
+        for args in [
+            vec!["operations", "--limit", "0"],
+            vec!["operations", "--limit", "1001"],
+            vec!["operations", "--all", "--limit", "5"],
+            vec!["operations", "--all", "--operation-id", "x"],
+            vec!["audit", "--all", "--cursor", "3"],
+            vec!["audit", "--cursor", "not-a-number"],
+        ] {
+            assert!(request(&args).is_err(), "{args:?}");
+        }
+        assert!(request(&["operations", "--limit", "5", "--operation-id", "x"]).is_err());
     }
 
     #[test]

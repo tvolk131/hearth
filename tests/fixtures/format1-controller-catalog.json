@@ -1,0 +1,230 @@
+{
+  "schema": 1,
+  "binding": {
+    "environment": "0123456789abcdef0123456789abcdef",
+    "backend": "simulated",
+    "disk_capacity_mib": 2048,
+    "min_memory_capacity_mib": 1024
+  },
+  "revision": 6,
+  "users": {
+    "erin": {
+      "user_id": "erin",
+      "role": "admin",
+      "budget_mib": 128,
+      "min_memory_budget_mib": 256,
+      "max_memory_budget_mib": 1024,
+      "max_cores": 8,
+      "max_vms": 4,
+      "ready": true
+    }
+  },
+  "devices": {
+    "895ea65949d69650187c56d8b9d93d36f4fa2cd5806619a3d1b5294a34a8ab02": {
+      "user_id": "erin",
+      "label": "fixture",
+      "revoked": true
+    },
+    "efa094f6ff200e4f66a346fbdb81715e18885959d498ca6b9481a6cd5c0cd674": {
+      "user_id": "erin",
+      "label": "bootstrap administrator",
+      "revoked": false
+    }
+  },
+  "vms": {
+    "9001": {
+      "vm_id": 9001,
+      "owner": "erin",
+      "name": "fixture-vm",
+      "disk_mib": 32,
+      "memory_mib": 128,
+      "min_memory_mib": 128,
+      "cores": 1,
+      "state": "stopped"
+    }
+  },
+  "operations": {
+    "2759a328bc976167c0128adcf5b88ec927623c67fb7c678b7f594ba064125a41": {
+      "public": {
+        "operation_id": "2759a328bc976167c0128adcf5b88ec927623c67fb7c678b7f594ba064125a41",
+        "owner": "erin",
+        "request_id": "fixture-create",
+        "kind": "create",
+        "vm_id": 9001,
+        "status": "verified",
+        "step": "test_observed",
+        "error": null,
+        "created_at": 1794725029,
+        "progress": {
+          "started_at": null,
+          "updated_at": 1794725029,
+          "finished_at": null,
+          "completed_steps": 0,
+          "total_steps": 6,
+          "detail": "Waiting for helper admission"
+        }
+      },
+      "actor": "erin",
+      "fingerprint": "0565f1500ae735f6652b6560cdbd4c050a64778b5c44c92df6bef241c1985cb2",
+      "job": {
+        "operation_id": "2759a328bc976167c0128adcf5b88ec927623c67fb7c678b7f594ba064125a41",
+        "kind": "create",
+        "owner": {
+          "user_id": "erin",
+          "role": "admin",
+          "budget_mib": 128,
+          "min_memory_budget_mib": 256,
+          "max_memory_budget_mib": 1024,
+          "max_cores": 8,
+          "max_vms": 4,
+          "ready": true
+        },
+        "vm": {
+          "vm_id": 9001,
+          "owner": "erin",
+          "name": "fixture-vm",
+          "disk_mib": 32,
+          "memory_mib": 128,
+          "min_memory_mib": 128,
+          "cores": 1,
+          "state": "creating"
+        }
+      }
+    },
+    "741fc938705fc1299c2c6e50248f0574366b4293f3290e3eb77b8da4ad7cf486": {
+      "public": {
+        "operation_id": "741fc938705fc1299c2c6e50248f0574366b4293f3290e3eb77b8da4ad7cf486",
+        "owner": "erin",
+        "request_id": "fixture-start",
+        "kind": "start",
+        "vm_id": 9001,
+        "status": "queued",
+        "step": "intent_committed",
+        "error": null,
+        "created_at": 1794725029,
+        "progress": {
+          "started_at": null,
+          "updated_at": 1794725029,
+          "finished_at": null,
+          "completed_steps": 0,
+          "total_steps": 2,
+          "detail": "Waiting for helper admission"
+        }
+      },
+      "actor": "erin",
+      "fingerprint": "6f41403a31bd3f25067afb636518ad5a412ebfa1d7983a79d16013b343cd1ce5",
+      "job": {
+        "operation_id": "741fc938705fc1299c2c6e50248f0574366b4293f3290e3eb77b8da4ad7cf486",
+        "kind": "start",
+        "owner": {
+          "user_id": "erin",
+          "role": "admin",
+          "budget_mib": 128,
+          "min_memory_budget_mib": 256,
+          "max_memory_budget_mib": 1024,
+          "max_cores": 8,
+          "max_vms": 4,
+          "ready": true
+        },
+        "vm": {
+          "vm_id": 9001,
+          "owner": "erin",
+          "name": "fixture-vm",
+          "disk_mib": 32,
+          "memory_mib": 128,
+          "min_memory_mib": 128,
+          "cores": 1,
+          "state": "stopped"
+        }
+      }
+    },
+    "7e2e17f99824c163e811914091a527be801702d5a45c3d1cf7879851d5a0ecde": {
+      "public": {
+        "operation_id": "7e2e17f99824c163e811914091a527be801702d5a45c3d1cf7879851d5a0ecde",
+        "owner": "erin",
+        "request_id": "bootstrap",
+        "kind": "ensure_user",
+        "vm_id": null,
+        "status": "verified",
+        "step": "test_observed",
+        "error": null,
+        "created_at": 1794725029,
+        "progress": {
+          "started_at": null,
+          "updated_at": 1794725029,
+          "finished_at": null,
+          "completed_steps": 0,
+          "total_steps": 3,
+          "detail": "Waiting for helper admission"
+        }
+      },
+      "actor": "erin",
+      "fingerprint": "bootstrap",
+      "job": {
+        "operation_id": "7e2e17f99824c163e811914091a527be801702d5a45c3d1cf7879851d5a0ecde",
+        "kind": "ensure_user",
+        "owner": {
+          "user_id": "erin",
+          "role": "admin",
+          "budget_mib": 128,
+          "min_memory_budget_mib": 256,
+          "max_memory_budget_mib": 1024,
+          "max_cores": 8,
+          "max_vms": 4,
+          "ready": false
+        },
+        "vm": null
+      }
+    }
+  },
+  "requests": {
+    "erin/bootstrap": "7e2e17f99824c163e811914091a527be801702d5a45c3d1cf7879851d5a0ecde",
+    "erin/fixture-create": "2759a328bc976167c0128adcf5b88ec927623c67fb7c678b7f594ba064125a41",
+    "erin/fixture-start": "741fc938705fc1299c2c6e50248f0574366b4293f3290e3eb77b8da4ad7cf486"
+  },
+  "audit": [
+    {
+      "actor": "erin",
+      "at": 1794725029,
+      "event": "intent_committed",
+      "operation_id": "7e2e17f99824c163e811914091a527be801702d5a45c3d1cf7879851d5a0ecde"
+    },
+    {
+      "at": 1794725029,
+      "event": "operation_terminal",
+      "operation_id": "7e2e17f99824c163e811914091a527be801702d5a45c3d1cf7879851d5a0ecde",
+      "status": "verified"
+    },
+    {
+      "actor": "erin",
+      "at": 1794725029,
+      "event": "intent_committed",
+      "operation_id": "2759a328bc976167c0128adcf5b88ec927623c67fb7c678b7f594ba064125a41"
+    },
+    {
+      "at": 1794725029,
+      "event": "operation_terminal",
+      "operation_id": "2759a328bc976167c0128adcf5b88ec927623c67fb7c678b7f594ba064125a41",
+      "status": "verified"
+    },
+    {
+      "actor": "erin",
+      "at": 1794725029,
+      "endpoint_id": "895ea65949d69650187c56d8b9d93d36f4fa2cd5806619a3d1b5294a34a8ab02",
+      "event": "device_enrolled",
+      "user_id": "erin"
+    },
+    {
+      "actor": "erin",
+      "at": 1794725029,
+      "endpoint_id": "895ea65949d69650187c56d8b9d93d36f4fa2cd5806619a3d1b5294a34a8ab02",
+      "event": "device_revoked"
+    },
+    {
+      "actor": "erin",
+      "at": 1794725029,
+      "event": "intent_committed",
+      "operation_id": "741fc938705fc1299c2c6e50248f0574366b4293f3290e3eb77b8da4ad7cf486"
+    }
+  ]
+}
