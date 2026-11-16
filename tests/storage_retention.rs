@@ -1103,3 +1103,40 @@ async fn retention_keeps_unfinished_work_and_everything_connected_to_it() {
     let plan = retention::plan(&catalog, &audit, &journal, now() - DAY).unwrap();
     assert!(plan.is_empty());
 }
+
+#[test]
+fn format1_database_with_a_foreign_table_is_refused_before_migrating() {
+    let directory = tempfile::tempdir().unwrap();
+    let (path, fixture) = format1_controller(directory.path());
+    {
+        let db = Database::open(&path).unwrap();
+        let tx = db.begin_write().unwrap();
+        tx.open_table(TableDefinition::<u64, u64>::new("operator_scratch"))
+            .unwrap()
+            .insert(1, 1)
+            .unwrap();
+        tx.commit().unwrap();
+    }
+    let error = Store::open(&path, &binding()).err().expect("refused");
+    assert!(
+        format!("{error:#}").contains("operator_scratch"),
+        "{error:#}"
+    );
+    // Nothing was migrated: once the stray table is removed, the deployed
+    // layout opens and migrates losslessly.
+    assert!(tables(&path).contains("controller_catalog_v1"));
+    {
+        let db = Database::open(&path).unwrap();
+        let tx = db.begin_write().unwrap();
+        assert!(
+            tx.delete_table(TableDefinition::<u64, u64>::new("operator_scratch"))
+                .unwrap()
+        );
+        tx.commit().unwrap();
+    }
+    let store = Store::open(&path, &binding()).unwrap();
+    assert_eq!(
+        serde_json::to_value(store.read_with_audit().unwrap()).unwrap(),
+        fixture
+    );
+}

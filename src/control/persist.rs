@@ -139,6 +139,16 @@ fn classify(kind: &Kind, names: &[String], format: Option<u64>) -> Result<Layout
         "{} missing; refusing initialization",
         kind.what
     );
+    // No Hearth build wrote any other table beside the legacy one. Refuse
+    // here, before migrating, because the current-format rules below would
+    // refuse the migrated database and the legacy table would already be gone.
+    for name in names {
+        ensure!(
+            name == kind.legacy,
+            "{} contains table {name}, which no Hearth build wrote; investigate before migrating",
+            kind.what
+        );
+    }
     Ok(Layout::Legacy)
 }
 
@@ -582,9 +592,31 @@ pub fn migrate_catalog_with(
         tx.delete_table(LEGACY_CATALOG)?,
         "legacy controller catalog vanished during migration"
     );
+    // The same checks that run on every open, run before the commit: a
+    // refusal now leaves the legacy database untouched.
+    check_written_catalog(&tx).context("migrated controller catalog failed verification")?;
     before_commit()?;
     tx.commit()?;
     Ok(true)
+}
+
+/// [`verify_catalog`] against an uncommitted migration.
+fn check_written_catalog(tx: &WriteTransaction) -> Result<()> {
+    ensure!(
+        write_layout(tx, &CONTROLLER)? == Layout::Split,
+        "controller catalog migration left an unrecognized layout"
+    );
+    let core = load_core(&tx.open_table(CATALOG_CORE)?, "controller catalog")?;
+    decode_catalog_core(&core, true)?;
+    decode_operations(&load_rows(&tx.open_table(OPERATIONS)?)?, true)?;
+    load_requests(&tx.open_table(REQUESTS)?)?;
+    let next = tx.open_table(META)?.get(AUDIT_NEXT_KEY)?.map(|v| v.value());
+    let last = tx.open_table(AUDIT)?.last()?.map(|(k, _)| k.value());
+    ensure!(
+        next.is_some_and(|next| last.is_none_or(|last| last < next)),
+        "controller audit sequence counter is missing or behind its log"
+    );
+    Ok(())
 }
 
 /// An open write transaction on a current-format catalog, holding the stored
@@ -873,9 +905,22 @@ pub fn migrate_journal_with(
         tx.delete_table(LEGACY_JOURNAL)?,
         "legacy helper journal vanished during migration"
     );
+    check_written_journal(&tx).context("migrated helper journal failed verification")?;
     before_commit()?;
     tx.commit()?;
     Ok(true)
+}
+
+/// [`verify_journal`] against an uncommitted migration.
+fn check_written_journal(tx: &WriteTransaction) -> Result<()> {
+    ensure!(
+        write_layout(tx, &HELPER)? == Layout::Split,
+        "helper journal migration left an unrecognized layout"
+    );
+    let core = load_core(&tx.open_table(JOURNAL_CORE)?, "helper journal")?;
+    decode_journal_core(&core, true)?;
+    decode_jobs(&load_rows(&tx.open_table(JOBS)?)?, true)?;
+    Ok(())
 }
 
 /// An open write transaction on a current-format journal.

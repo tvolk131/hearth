@@ -25,8 +25,12 @@ separate from the logical `schema` field inside the catalog and journal.
 and the operation and request rows inside one write transaction. It rewrites
 only the rows that changed and appends any new audit entries. The audit log
 is not loaded for ordinary requests. `hearth_meta.audit_next` hands out audit
-sequence numbers, so a number is never reused after pruning. The helper's
-`change` works the same way.
+sequence numbers, so within one database a number is never reused after
+pruning. A backup bundle carries entries without their numbers, so a
+quarantined restore renumbers the retained entries from 0: after a restore,
+identify archived entries by the archive they came from, not by number alone,
+and discard saved `list_audit` cursors. The helper's `change` works the same
+way.
 
 ### Refusing newer state
 
@@ -52,9 +56,19 @@ find its catalog instead of starting with partial state.
 `Store::open` and `Host::open` first validate the legacy row: scope, binding
 and helper identity checks. Then they migrate once, in a single redb write
 transaction. The transaction writes the split tables and the format marker,
-deletes the legacy table, then commits. redb commits are atomic, so a crash
-leaves either the untouched format-1 database or a complete format-2 one, and
-the next open simply retries. Tests cover:
+deletes the legacy table, runs the same lossless and audit-counter checks that
+every later open runs, and only then commits. A format-1 database holding any
+table besides its legacy one is refused before anything is written. redb
+commits are atomic, so a crash or a refused check leaves either the untouched
+format-1 database or a complete, verified format-2 one, and the next open
+simply retries.
+
+There is no automatic way back: once migrated, the previously deployed binary
+cannot open either database, and it refuses bundles written by this build
+after a prune. Before upgrading a host, take a `pve-dev-ops backup` with the
+binary that is **currently deployed**, and keep it. Rolling back means
+restoring that bundle with the old binary; anything accepted after the upgrade
+is lost. Tests cover:
 
 * migration from a committed format-1 fixture
   (`tests/fixtures/format1-controller-catalog.json`) and from a format-1
