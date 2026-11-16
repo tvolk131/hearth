@@ -1104,7 +1104,7 @@ async fn run() -> Result<bool> {
 
 #[tokio::main]
 async fn main() {
-    pve_dev::control::init_diagnostic_logging();
+    hearth::control::init_diagnostic_logging();
     match run().await {
         Ok(true) => {}
         Ok(false) => std::process::exit(2),
