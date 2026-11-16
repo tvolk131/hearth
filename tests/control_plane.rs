@@ -563,3 +563,193 @@ fn controller_never_recreates_a_lost_database_on_open() {
     let input: Value = json!({"action":"dashboard"});
     assert!(serde_json::from_value::<Request>(input).is_ok());
 }
+
+struct Wire {
+    directory: TempDir,
+    descriptor: Descriptor,
+    store: Arc<Store>,
+    admin: Profile,
+    stop: tokio::sync::oneshot::Sender<()>,
+    server: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl Wire {
+    async fn start() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let endpoint = transport::endpoint(SecretKey::generate(), Network::Loopback, 0, true)
+            .await
+            .unwrap();
+        let descriptor = Descriptor {
+            schema: 1,
+            endpoint: endpoint.addr(),
+            environment: ENVIRONMENT.into(),
+            network: Network::Loopback,
+        };
+        let admin = profile(directory.path(), "admin.key", &descriptor);
+        let admin_id = Self::device(&admin);
+        let store = Arc::new(
+            Store::create(&directory.path().join("state.redb"), binding(), &admin_id).unwrap(),
+        );
+        ready(&store);
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(transport::serve(endpoint, store.clone(), async {
+            let _ = stopped.await;
+        }));
+        Self {
+            directory,
+            descriptor,
+            store,
+            admin,
+            stop,
+            server,
+        }
+    }
+    fn device(profile: &Profile) -> String {
+        transport::load_identity(&profile.identity)
+            .unwrap()
+            .public()
+            .to_string()
+    }
+    /// A client endpoint that can open raw connections and simply hold them.
+    async fn client(&self, key: SecretKey) -> iroh::Endpoint {
+        transport::endpoint(key, Network::Loopback, 0, false)
+            .await
+            .unwrap()
+    }
+    async fn hold(&self, client: &iroh::Endpoint, count: usize) -> Vec<iroh::endpoint::Connection> {
+        let mut held = Vec::new();
+        for _ in 0..count {
+            // The server may close a refused connection before the client
+            // finishes its side of the handshake; either outcome is fine.
+            if let Ok(connection) = client.connect(self.descriptor.endpoint.clone(), ALPN).await {
+                held.push(connection);
+            }
+        }
+        held
+    }
+    async fn stop(self) {
+        self.stop.send(()).unwrap();
+        self.server.await.unwrap().unwrap();
+    }
+}
+
+fn not_enrolled(text: &str) -> bool {
+    text.contains("device is not enrolled or has been revoked")
+}
+
+#[tokio::test]
+async fn unknown_peers_cannot_exhaust_enrolled_capacity_and_still_learn_why() {
+    let wire = Wire::start().await;
+    // More idle unknown connections than every post-handshake pool combined.
+    // Before admission control, 32 of these held every slot for 30 seconds.
+    let flood = transport::ENROLLED_SLOTS + transport::REJECTION_SLOTS + 8;
+    let mut clients = Vec::new();
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let client = wire.client(SecretKey::generate()).await;
+        held.extend(wire.hold(&client, flood / 4).await);
+        clients.push(client);
+    }
+    assert!(!held.is_empty());
+
+    // The rejection pool is now full. Enrolled work is unaffected, and an
+    // unknown peer still learns why it is refused, from the close reason.
+    let started = std::time::Instant::now();
+    let response = transport::rpc(&wire.admin, Request::Whoami {})
+        .await
+        .unwrap();
+    assert!(response.ok, "{:?}", response.error);
+    assert!(started.elapsed() < transport::REJECTION_TIMEOUT);
+    let unknown = profile(wire.directory.path(), "unknown.key", &wire.descriptor);
+    let refused = transport::rpc(&unknown, Request::Dashboard {}).await;
+    let text = match refused {
+        Ok(response) => response.error.unwrap().message,
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(not_enrolled(&text), "{text}");
+
+    // The server closes every unknown connection itself, without waiting for
+    // the idle client, and says why.
+    for connection in held {
+        let reason = tokio::time::timeout(
+            transport::REJECTION_TIMEOUT + Duration::from_secs(2),
+            connection.closed(),
+        )
+        .await
+        .expect("server must close unknown connections");
+        assert!(not_enrolled(&reason.to_string()), "{reason}");
+    }
+
+    // With the rejection pool free again, the full reply is a protocol error.
+    let error = transport::rpc(&unknown, Request::Dashboard {})
+        .await
+        .unwrap()
+        .error
+        .unwrap();
+    assert_eq!(error.code, "forbidden");
+    assert!(not_enrolled(&error.message), "{}", error.message);
+    for client in clients {
+        client.close().await;
+    }
+    wire.stop().await;
+}
+
+#[tokio::test]
+async fn one_device_cannot_take_every_enrolled_slot() {
+    let wire = Wire::start().await;
+    let admin = Wire::device(&wire.admin);
+    person(&wire.store, &admin, "frank");
+    let frank = profile(wire.directory.path(), "frank.key", &wire.descriptor);
+    wire.store
+        .handle(
+            &admin,
+            Request::EnrollDevice {
+                user_id: "frank".into(),
+                endpoint_id: Wire::device(&frank),
+                label: "second device".into(),
+            },
+        )
+        .unwrap();
+
+    let key = transport::load_identity(&wire.admin.identity).unwrap();
+    let client = wire.client(key).await;
+    let held = wire.hold(&client, transport::DEVICE_SLOTS).await;
+    assert_eq!(held.len(), transport::DEVICE_SLOTS);
+    // Let the server finish admitting the held connections.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // One more connection from the same device is closed at once.
+    let extra = wire.hold(&client, 1).await;
+    if let Some(extra) = extra.first() {
+        let reason = tokio::time::timeout(Duration::from_secs(2), extra.closed())
+            .await
+            .expect("an over-cap connection must be closed straight away");
+        assert!(reason.to_string().contains("too many"), "{reason}");
+    }
+    let error = transport::rpc(&wire.admin, Request::Whoami {})
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("too many"), "{error:#}");
+
+    // Another device still has room.
+    let response = transport::rpc(&frank, Request::Whoami {}).await.unwrap();
+    assert_eq!(response.result.unwrap()["user_id"], "frank");
+
+    // Once the held connections end, the device gets its slots back.
+    for connection in &held {
+        connection.close(0u32.into(), b"done");
+    }
+    let recovered = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(response) = transport::rpc(&wire.admin, Request::Whoami {}).await {
+                break response;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("device slots must be released");
+    assert!(recovered.ok);
+    client.close().await;
+    wire.stop().await;
+}

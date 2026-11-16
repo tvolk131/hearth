@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs::{self, OpenOptions},
     io::Write,
     net::SocketAddr,
@@ -11,7 +12,11 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use iroh::{Endpoint, EndpointAddr, SecretKey, endpoint::presets};
 use serde::{Deserialize, Serialize};
-use tokio::{sync::Semaphore, task::JoinSet, time::timeout};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore},
+    task::JoinSet,
+    time::timeout,
+};
 
 use super::{
     protocol::*,
@@ -270,55 +275,196 @@ pub async fn rpc_bound(
     result?
 }
 
-async fn connection(
+/// Connections still in the QUIC/TLS handshake. Nothing is known about the
+/// peer yet, so these are cheap to take and released as soon as the
+/// handshake finishes or [`HANDSHAKE_TIMEOUT`] passes.
+pub const HANDSHAKE_SLOTS: usize = 64;
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Connections from enrolled devices that may run a request at once.
+pub const ENROLLED_SLOTS: usize = 32;
+/// Share of [`ENROLLED_SLOTS`] that one device may hold, so one device
+/// cannot starve the others.
+pub const DEVICE_SLOTS: usize = 8;
+/// Upper bound for one enrolled connection, from admission to close.
+pub const ENROLLED_TIMEOUT: Duration = Duration::from_secs(30);
+/// Unknown or revoked peers that get a full "not enrolled" reply at once.
+/// Beyond this, they are closed straight away with the same reason.
+pub const REJECTION_SLOTS: usize = 4;
+pub const REJECTION_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Application close codes the controller sends.
+const CLOSE_DONE: u32 = 0;
+const CLOSE_NOT_ENROLLED: u32 = 1;
+const CLOSE_BUSY: u32 = 2;
+const CLOSE_TIMEOUT: u32 = 3;
+const NOT_ENROLLED: &str = "device is not enrolled or has been revoked";
+
+/// Per-device count of held enrolled connections. Only enrolled devices get
+/// an entry, and an entry is removed when its last connection ends.
+#[derive(Default)]
+struct DeviceSlots(std::sync::Mutex<HashMap<String, usize>>);
+
+struct DeviceSlot {
+    slots: Arc<DeviceSlots>,
+    peer: String,
+}
+
+impl DeviceSlots {
+    fn try_acquire(self: &Arc<Self>, peer: &str) -> Option<DeviceSlot> {
+        let mut held = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let count = held.entry(peer.to_owned()).or_default();
+        if *count >= DEVICE_SLOTS {
+            return None;
+        }
+        *count += 1;
+        Some(DeviceSlot {
+            slots: self.clone(),
+            peer: peer.to_owned(),
+        })
+    }
+}
+
+impl Drop for DeviceSlot {
+    fn drop(&mut self) {
+        let mut held = self.slots.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = held.get_mut(&self.peer) {
+            *count -= 1;
+            if *count == 0 {
+                held.remove(&self.peer);
+            }
+        }
+    }
+}
+
+struct Admission {
+    handshakes: Arc<Semaphore>,
+    enrolled: Arc<Semaphore>,
+    rejections: Arc<Semaphore>,
+    devices: Arc<DeviceSlots>,
+}
+
+impl Admission {
+    fn new() -> Self {
+        Self {
+            handshakes: Arc::new(Semaphore::new(HANDSHAKE_SLOTS)),
+            enrolled: Arc::new(Semaphore::new(ENROLLED_SLOTS)),
+            rejections: Arc::new(Semaphore::new(REJECTION_SLOTS)),
+            devices: Arc::default(),
+        }
+    }
+}
+
+fn encode(result: Result<serde_json::Value, ApiError>) -> Result<Vec<u8>> {
+    let response = serde_json::to_vec(&Response::from_result(result))?;
+    if response.len() <= MAX_RESPONSE {
+        return Ok(response);
+    }
+    Ok(serde_json::to_vec(&Response::from_result(Err(failure(
+        "unavailable",
+        "response exceeds protocol limit; administrator must archive history",
+    ))))?)
+}
+
+/// Write the one response, then wait only until the peer has acknowledged it.
+/// The caller closes the connection; the client never has to.
+async fn respond(mut send: iroh::endpoint::SendStream, response: &[u8]) -> Result<()> {
+    send.write_all(response).await?;
+    send.finish()?;
+    send.stopped().await?;
+    Ok(())
+}
+
+/// Takes a connection from handshake to close. Each stage holds only its own
+/// slot, and unknown peers never reach the enrolled pool.
+async fn admit(
     incoming: iroh::endpoint::Incoming,
+    handshake: OwnedSemaphorePermit,
+    admission: Arc<Admission>,
+    store: Arc<Store>,
+    services: Option<Arc<super::services::Services>>,
+) {
+    // Handshake failures and stalls come from unauthenticated peers; they are
+    // not worth logging.
+    let Ok(Ok(connection)) = timeout(HANDSHAKE_TIMEOUT, incoming).await else {
+        return;
+    };
+    drop(handshake);
+    let peer = connection.remote_id().to_string();
+    if !store.authorized(&peer) {
+        reject(&connection, &admission).await;
+        return;
+    }
+    let Some(_device) = admission.devices.try_acquire(&peer) else {
+        connection.close(
+            CLOSE_BUSY.into(),
+            b"too many concurrent connections from this device; retry shortly",
+        );
+        return;
+    };
+    let Ok(_slot) = admission.enrolled.clone().try_acquire_owned() else {
+        connection.close(CLOSE_BUSY.into(), b"controller is busy; retry shortly");
+        return;
+    };
+    match timeout(
+        ENROLLED_TIMEOUT,
+        enrolled(&connection, &peer, store, services),
+    )
+    .await
+    {
+        Ok(Ok(())) => connection.close(CLOSE_DONE.into(), b"response sent"),
+        Ok(Err(error)) => {
+            connection.close(CLOSE_DONE.into(), b"connection failed");
+            eprintln!("control connection failed: {error:#}");
+        }
+        Err(_) => connection.close(CLOSE_TIMEOUT.into(), b"request timed out"),
+    }
+}
+
+/// Tell an unknown or revoked peer why it was refused, within a small pool and
+/// a short deadline, then close from this side. When the pool is full, the
+/// close reason alone carries the message.
+async fn reject(connection: &iroh::endpoint::Connection, admission: &Admission) {
+    if let Ok(_slot) = admission.rejections.clone().try_acquire_owned() {
+        let _ = timeout(REJECTION_TIMEOUT, async {
+            let (send, mut receive) = connection.accept_bi().await?;
+            // Read the bounded request so the client's write is not stopped
+            // before it can read the reply.
+            receive.read_to_end(MAX_REQUEST).await?;
+            respond(send, &encode(Err(failure("forbidden", NOT_ENROLLED)))?).await
+        })
+        .await;
+    }
+    connection.close(CLOSE_NOT_ENROLLED.into(), NOT_ENROLLED.as_bytes());
+}
+
+async fn enrolled(
+    connection: &iroh::endpoint::Connection,
+    peer: &str,
     store: Arc<Store>,
     services: Option<Arc<super::services::Services>>,
 ) -> Result<()> {
-    let connection = incoming.await?;
-    let peer = connection.remote_id().to_string();
-    let authorized = store.authorized(&peer);
-    let (mut send, mut receive) = connection.accept_bi().await?;
+    let (send, mut receive) = connection.accept_bi().await?;
     let bytes = receive.read_to_end(MAX_REQUEST).await?;
-    let result = if !authorized {
-        Err(failure(
-            "forbidden",
-            "device is not enrolled or has been revoked",
-        ))
-    } else {
-        match serde_json::from_slice::<WireRequest>(&bytes) {
-            Err(_) => Err(failure(
-                "invalid",
-                "malformed or unsupported control request",
-            )),
-            Ok(request) => {
-                let binding = store.read()?.binding;
-                if request.schema != 1 || request.environment != binding.environment {
-                    Err(failure(
-                        "forbidden",
-                        "controller environment identity mismatch",
-                    ))
-                } else {
-                    if let Some(services) = services {
-                        services.handle(&store, &peer, request.request).await
-                    } else {
-                        store.handle(&peer, request.request)
-                    }
-                }
+    let result = match serde_json::from_slice::<WireRequest>(&bytes) {
+        Err(_) => Err(failure(
+            "invalid",
+            "malformed or unsupported control request",
+        )),
+        Ok(request) => {
+            let binding = store.read()?.binding;
+            if request.schema != 1 || request.environment != binding.environment {
+                Err(failure(
+                    "forbidden",
+                    "controller environment identity mismatch",
+                ))
+            } else if let Some(services) = services {
+                services.handle(&store, peer, request.request).await
+            } else {
+                store.handle(peer, request.request)
             }
         }
     };
-    let mut response = serde_json::to_vec(&Response::from_result(result))?;
-    if response.len() > MAX_RESPONSE {
-        response = serde_json::to_vec(&Response::from_result(Err(failure(
-            "unavailable",
-            "response exceeds protocol limit; administrator must archive history",
-        ))))?;
-    }
-    send.write_all(&response).await?;
-    send.finish()?;
-    connection.closed().await;
-    Ok(())
+    respond(send, &encode(result)?).await
 }
 
 pub async fn serve(
@@ -335,7 +481,7 @@ pub async fn serve_with_services(
     services: Option<Arc<super::services::Services>>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<()> {
-    let permits = Arc::new(Semaphore::new(32));
+    let admission = Arc::new(Admission::new());
     let mut tasks = JoinSet::new();
     tokio::pin!(shutdown);
     loop {
@@ -346,15 +492,8 @@ pub async fn serve_with_services(
             }
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else { break; };
-                let Ok(permit) = permits.clone().try_acquire_owned() else { incoming.refuse(); continue; };
-                let store = store.clone();
-                let services=services.clone();
-                tasks.spawn(async move {
-                    let _permit = permit;
-                    if let Ok(Err(error)) = timeout(Duration::from_secs(30), connection(incoming, store, services)).await {
-                        eprintln!("control connection failed: {error}");
-                    }
-                });
+                let Ok(handshake) = admission.handshakes.clone().try_acquire_owned() else { incoming.refuse(); continue; };
+                tasks.spawn(admit(incoming, handshake, admission.clone(), store.clone(), services.clone()));
             }
         }
     }
