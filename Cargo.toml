@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 default-run = "pve-devctl"
 description = "Hearth: a multi-user Proxmox control plane"
+license = "MIT"
 
 [dependencies]
 anyhow = "1"

@@ -38,9 +38,11 @@ services, separate from the controller's member account.
 
 ## Required qualification
 
-The completed run used `deployment/physical_trial.py --execute` with reviewed
-one-off continuations. Its readiness switch is disabled again because routine
-cloud-init metadata reconciliation remains unfinished. Its evidence gate requires a complete scoped
+The completed run used a hardware driver, `deployment/physical_trial.py --execute`,
+with reviewed one-off continuations. That driver was never committed to this
+repository; `lab/physical_trial_suite.py` ([physical-trial-backend.md](physical-trial-backend.md)) is the emulated scoped suite, not the
+hardware driver. The driver's readiness switch was disabled again afterwards
+because routine cloud-init metadata reconciliation remains unfinished. Its evidence gate requires a complete scoped
 Proxmox report covers real quota growth/contraction, below-commitment refusal,
 effect-present helper restart, read-only empty-filesystem inspection and verified
 empty-account deletion. All three Linux binary hashes must equal those actually

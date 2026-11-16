@@ -13,7 +13,7 @@ The core design goal is that **nothing happens twice and nothing is silently los
 | `pve-devd` | each Proxmox host, unprivileged | Controller: accounts, budgets, request admission, authenticated [iroh](https://iroh.computer) RPC. State in [redb](https://www.redb.org). |
 | `pve-dev-host` | each Proxmox host, root | Privileged helper: performs Proxmox/ZFS changes from a separate recovery journal, accepting only scoped, fingerprinted jobs. |
 | `pve-devctl` | client | CLI for users and admins. JSON on stdout; exit 0 success, 2 rejected by server, 1 local or transport error. |
-| `pve-dev-ops` | host, root | Offline maintenance: paired backups, quarantined restores, service staging. The `expand-compute` and `offline-shrink-reconcile` subcommands also run on an operator workstation and produce new quarantined state (raised compute ceilings, or reconciliation of an independently verified offline shrink) from a backup bundle; they never touch disks, live state or workers. |
+| `pve-dev-ops` | host, root | Offline maintenance: paired backups, verification, quarantined restores and managed-adoption preparation. The `expand-compute` and `offline-shrink-reconcile` subcommands also run on an operator workstation and produce new quarantined state (raised compute ceilings, or reconciliation of an independently verified offline shrink) from a backup bundle; they never touch disks, live state or workers. |
 | `pve-dev-inventory` | client | Read-only discovery of existing hosts into a separate observation store. |
 | `macos/` | client | SwiftUI app. Drives `pve-devctl` and never reads keys or databases itself. |
 
@@ -59,8 +59,8 @@ bash scripts/check-swift.sh
 - [`docs/deployment-recovery.md`](docs/deployment-recovery.md): backups and restores
 - Feature notes: [disk shrink](docs/disk-shrink.md), [quota editing](docs/quota-editing.md), [user deletion](docs/user-deletion.md), [stopped migration](docs/stopped-migration.md), [discovery](docs/discovery.md)
 
-Some docs still read like development logs and are being rewritten.
+Dated validation runs and project history are in [`CHANGELOG.md`](CHANGELOG.md). Some feature notes ([physical trial](docs/physical-trial.md), [migration spike](docs/migration-spike.md), [state-machine audit](docs/state-machine-audit.md)) are reports of a specific run or review and are kept as historical records.
 
 ## License
 
-Not yet licensed. All rights reserved until a license is added.
+Hearth is released under the [MIT License](LICENSE). Copyright (c) 2026 Tommy Volk.

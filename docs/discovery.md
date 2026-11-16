@@ -109,19 +109,11 @@ The store is a dedicated redb file whose meta `kind` is `pve-dev-discovery-obser
 - **Ownership stability:** ownership is tracked per host by `dataset:GUID` and `vm:VMID`, with `unmanaged` for unmanaged VMs. A later import that changes recorded ownership is refused. A snapshot not newer than the latest import (by `captured_at`) is refused as stale.
 - **Tamper evidence:** every snapshot/import write appends a hash-chained log entry containing the record's SHA-256. `open` and `verify` recompute the chain, every record hash and digest, and the host records by replaying the log. Any mismatch refuses opening.
 
-## Real read-only validation (November 9, 2026)
-
-Collector v2 ran over strictly pinned, non-forwarding SSH against the existing Hetzner PVE **9.2.26** node. The capture at `2026-11-10T01:32:56Z` is November 9 in America/Chicago. It validated without warnings: ten datasets, six volumes, three VMs, no containers or snapshots, and all double-read consistency checks true. No Proxmox/ZFS configuration, guest state or access policy was changed; SSH can still generate ordinary access logs.
-
-The explicit mapping binds VM 101 and `dev-erin` to Erin, 102 and `dev-frank` to Frank, and 103 and `dev-heidi` to Heidi, using dataset GUIDs and exact disk-slot maps rather than names as authority. Each observed owner allocation has a 1.5 TiB quota and reservation; all six zvols are fully reserved. The first import recorded the observation, a separate-process re-import returned `Duplicate`, and reopening/verifying the database found one snapshot, one import and two intact log entries. All management flags remain false and no controller state was created.
-
-Private local artifacts are under `.lab/hetzner-discovery-v2-20261110T013233Z/`: `snapshot.json`, the reviewed `mapping.json`, final importer outputs, `receipt.json`, and **`observations-final.redb`**. Use this final database; the earlier `observations.redb` is retained as intermediate evidence from before correcting missing NIC model/MAC extraction. Do not publish this operational inventory or the `.lab` directory. The final receipt checks that the collector actually sent has the import record's expected source hash.
-
-The initial v1 capture was correctly refused because PVE returned equal storage-content sets in different orders. It was retained as rejected evidence, not modified to bypass validation. A new v2 capture sorts only set-valued storage `content`/`nodes`; regression tests still refuse actual membership changes.
+The first real read-only capture is recorded in [CHANGELOG.md](../CHANGELOG.md#2026-11-09).
 
 ## Known gaps
 
-- The collector's real PVE paths and flags are now exercised on this specific single-node host, not every Proxmox version or storage topology. No management adapter is validated by this observation-only test.
+- The collector's real PVE paths and flags have been exercised on one single-node PVE 9.2.26 host, not every Proxmox version or storage topology. No management adapter is validated by this observation-only test.
 - A snapshot has no cryptographic attestation. Origin rests on the operator running the pinned SSH command; the host fingerprint inside the snapshot is self-reported, not proven. `expected_collector_sha256` records what this importer would print, not what actually ran.
 - Tamper evidence is not tamper-proofing. Nothing is signed or keyed, so anyone who can rewrite the whole file consistently can forge history. Back up or restore only by copying a stopped file.
 - There is no supported remapping or ownership-transfer path. A legitimate owner change requires a new observation database after human review. A host re-key or rename is refused the same way.
