@@ -1,13 +1,13 @@
 //! Independent regression checks for cross-policy accounting and stale helpers.
-use pve_dev::control::JobKind;
+use hearth::control::JobKind;
 use std::path::PathBuf;
 
-use iroh::SecretKey;
-use pve_dev::control::{
+use hearth::control::{
     host::{Fault, FaultPoint, Host, HostConfig, MIB, SimulatedWorld, Step, World},
     protocol::*,
     store::{Binding, Job, PolicyChange, Store},
 };
+use iroh::SecretKey;
 use serde_json::Value;
 
 const ENV: &str = "0123456789abcdef0123456789abcdef";

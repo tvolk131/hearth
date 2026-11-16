@@ -1,5 +1,5 @@
+use hearth::control::transport::{self, Descriptor, Network, Profile, ProfileBinding};
 use iroh::{EndpointAddr, SecretKey};
-use pve_dev::control::transport::{self, Descriptor, Network, Profile, ProfileBinding};
 use std::{
     fs,
     process::Command,
@@ -27,7 +27,7 @@ fn fixture() -> (tempfile::TempDir, Profile, std::path::PathBuf) {
 }
 
 fn invoke(path: &std::path::Path, binding: &ProfileBinding) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_pve-devctl"))
+    Command::new(env!("CARGO_BIN_EXE_hearth"))
         .arg("--profile")
         .arg(path)
         .args([
@@ -46,7 +46,7 @@ fn invoke(path: &std::path::Path, binding: &ProfileBinding) -> std::process::Out
 #[test]
 fn local_profile_info_returns_only_public_identifiers_without_connecting() {
     let (_directory, profile, path) = fixture();
-    let output = Command::new(env!("CARGO_BIN_EXE_pve-devctl"))
+    let output = Command::new(env!("CARGO_BIN_EXE_hearth"))
         .arg("--profile")
         .arg(&path)
         .arg("profile-info")
@@ -130,7 +130,7 @@ fn inspection_preserves_schema_environment_and_private_file_guards() {
     fs::set_permissions(&profile.identity, fs::Permissions::from_mode(0o644)).unwrap();
     fs::write(&path, serde_json::to_vec(&profile).unwrap()).unwrap();
     assert!(transport::profile_binding(&profile).is_err());
-    let output = Command::new(env!("CARGO_BIN_EXE_pve-devctl"))
+    let output = Command::new(env!("CARGO_BIN_EXE_hearth"))
         .arg("--profile")
         .arg(&path)
         .args(["--expected-server-id", "partial", "dashboard"])
@@ -146,7 +146,7 @@ fn existing_profile_creation_expected_server_option_remains_compatible() {
     let descriptor = directory.path().join("server.json");
     fs::write(&descriptor, serde_json::to_vec(&profile.server).unwrap()).unwrap();
     let destination = directory.path().join("generated.json");
-    let output = Command::new(env!("CARGO_BIN_EXE_pve-devctl"))
+    let output = Command::new(env!("CARGO_BIN_EXE_hearth"))
         .arg("profile")
         .arg("--identity")
         .arg(&profile.identity)

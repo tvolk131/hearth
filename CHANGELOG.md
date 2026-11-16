@@ -17,6 +17,15 @@ Notes on what these entries refer to:
 
 ## Unreleased
 
+- Renamed the binaries and app to Hearth: `pve-devd` is now `hearthd`,
+  `pve-dev-host` is `hearth-host`, `pve-devctl` is `hearth`, `pve-dev-ops` is
+  `hearth-ops` and `pve-dev-inventory` is `hearth-inventory`. The crate is
+  `hearth`, and the Swift package builds `Hearth` and `HearthCore`. Entries
+  below keep the old names. Deployed identifiers are unchanged so existing
+  installs keep working: the iroh ALPN `pve-dev/control/1`, systemd unit names,
+  state, run and config directories, service accounts, and the app's
+  `UserDefaults` keys, bundle identifiers, ledger namespace and
+  `Application Support` directories.
 - Licensed under the MIT License (`LICENSE`, `license = "MIT"` in `Cargo.toml`).
 - Moved dated validation history out of the docs and READMEs into this file.
 - Docs no longer point at `deployment/` scripts as if they were in the

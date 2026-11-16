@@ -5,14 +5,14 @@ use std::{
     sync::Arc,
 };
 
-use iroh::SecretKey;
-use pve_dev::control::{
+use hearth::control::{
     host::{Host, HostConfig, HostRequest, SimulatedWorld},
     maintenance::{self, Pins, QUARANTINE},
     protocol::{OperationStatus, Request},
     store::Binding,
     transport::{self, Descriptor, Network, Profile, ServerConfig},
 };
+use iroh::SecretKey;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -167,7 +167,7 @@ async fn paired_restore_preserves_accepted_intent_idempotency_identity_and_revoc
         .await
         .is_err()
     );
-    let restored_store = pve_dev::control::store::Store::open(
+    let restored_store = hearth::control::store::Store::open(
         &restored.join("controller/state.redb"),
         &serde_json::from_value(before["binding"].clone()).unwrap(),
     )
@@ -197,7 +197,7 @@ async fn paired_restore_preserves_accepted_intent_idempotency_identity_and_revoc
 
 #[tokio::test]
 async fn schema5_restore_preserves_queued_and_prepared_shrink_holds_without_activation() {
-    async fn flush(host: &Host, store: &pve_dev::control::store::Store) {
+    async fn flush(host: &Host, store: &hearth::control::store::Store) {
         for operation in store.pending().unwrap() {
             host.submit(operation.job).unwrap();
             host.run_pending().await.unwrap();
@@ -271,7 +271,7 @@ async fn schema5_restore_preserves_queued_and_prepared_shrink_holds_without_acti
             .await
             .is_err()
         );
-        let snapshot = pve_dev::control::store::Store::open(
+        let snapshot = hearth::control::store::Store::open(
             &restored.join("controller/state.redb"),
             &before.binding,
         )
@@ -292,7 +292,7 @@ async fn schema5_restore_preserves_queued_and_prepared_shrink_holds_without_acti
 
 #[tokio::test]
 async fn schema6_growth_claim_and_partially_committed_profile_survive_quarantined_restore() {
-    use pve_dev::control::host::{Fault, FaultPoint, Step};
+    use hearth::control::host::{Fault, FaultPoint, Step};
     for interrupted in [false, true] {
         let f = Fixture::with_guest(true).await;
         let mut host = Host::open(HostConfig::simulated(
@@ -303,7 +303,7 @@ async fn schema6_growth_claim_and_partially_committed_profile_survive_quarantine
         .await
         .unwrap();
         let (_, store, _) = transport::open(&f.controller).unwrap();
-        async fn flush(host: &Host, store: &pve_dev::control::store::Store) {
+        async fn flush(host: &Host, store: &hearth::control::store::Store) {
             for r in store.pending().unwrap() {
                 host.submit(r.job).unwrap();
                 host.run_pending().await.unwrap();
@@ -405,7 +405,7 @@ async fn schema6_growth_claim_and_partially_committed_profile_survive_quarantine
             .await
             .is_err()
         );
-        let recovered = pve_dev::control::store::Store::open(
+        let recovered = hearth::control::store::Store::open(
             &restored.join("controller/state.redb"),
             &before.binding,
         )
@@ -783,7 +783,7 @@ async fn schema_two_policy_edits_survive_paired_backup_and_quarantined_restore()
         )
         .unwrap();
         assert!(transport::open(&restored.join("controller")).is_err());
-        let restored_store = pve_dev::control::store::Store::open(
+        let restored_store = hearth::control::store::Store::open(
             &restored.join("controller/state.redb"),
             &serde_json::from_value(before["binding"].clone()).unwrap(),
         )
@@ -887,7 +887,7 @@ async fn schema_three_pending_and_completed_empty_user_deletion_remain_quarantin
         )
         .unwrap();
         assert!(transport::open(&restored.join("controller")).is_err());
-        let restored_store = pve_dev::control::store::Store::open(
+        let restored_store = hearth::control::store::Store::open(
             &restored.join("controller/state.redb"),
             &serde_json::from_value(before["binding"].clone()).unwrap(),
         )

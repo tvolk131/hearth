@@ -1,8 +1,8 @@
-# PveDevApp: experimental macOS lab client
+# Hearth: experimental macOS lab client
 
 > **Experimental.** Lab and simulated controllers create VMs with **blank root disks**. Physical-trial controllers require an explicitly configured disposable-resource scope and advertise each enabled maintenance capability. A separate **Read-only Host** connection observes real Proxmox/ZFS machines over pinned SSH and offers no changes or enrollment. Each controller's environment and backend appear as a badge on its **Servers** home card; a physical trial is shown in orange.
 
-PveDevApp is a native SwiftUI frontend (macOS 14+) over the Rust `pve-devctl` CLI. It is deliberately thin:
+Hearth is a native SwiftUI frontend (macOS 14+) over the Rust `hearth` CLI. It is deliberately thin:
 
 - All networking, iroh, authentication, authorization policy, budgets and state stay in Rust.
 - The app never opens the profile, private keys, or `redb`/state databases. It passes the profile **path** and saved public identity expectations to the CLI.
@@ -12,24 +12,24 @@ PveDevApp is a native SwiftUI frontend (macOS 14+) over the Rust `pve-devctl` CL
 
 | Path | Purpose |
 | --- | --- |
-| `Package.swift` | SwiftPM manifest: `PveDevApp` executable, `PveDevCore` library, `PveDevCoreTests` |
-| `Sources/PveDevCore/WireModels.swift` | Decodable `User`, `Budget`, `Vm`, `OperationRecord`, `DashboardResult`, `UpdatedResult` |
-| `Sources/PveDevCore/WireRequests.swift` | `RpcRequest`, which encodes the tagged `action` wire format exactly |
-| `Sources/PveDevCore/WireResponse.swift` | `{ok,result}` / `{ok,error}` envelope, `RpcFailure`, response interpretation |
-| `Sources/PveDevCore/ProcessRunner.swift` | Bounded, cancellable child-process runner (no shell) |
-| `Sources/PveDevCore/RpcClient.swift` | Builds `pve-devctl --profile <path> rpc` invocations |
-| `Sources/PveDevCore/MutationLedger.swift` | Request-ID retention and on-disk pending-request ledger |
-| `Sources/PveDevCore/AppSettings.swift`, `ServerProfile.swift` | Named servers, pinned public identities, path validation and settings migration |
-| `Sources/PveDevCore/FormDrafts.swift`, `Permissions.swift`, `SafeText.swift` | Form validation, visibility rules, display sanitising |
-| `Sources/PveDevCore/DisplayVocabulary.swift` | Canonical display strings for wire values (Owner, Needs investigation, Completed, transfer phases) |
-| `Sources/PveDevApp/*` | SwiftUI app: sidebar, Servers home, VMs, Operations, Pending Requests, Users, Devices, Settings |
-| `Sources/PveDevApp/AppModel.swift` | The environment object pages use; composes the parts below and forwards to them |
-| `Sources/PveDevApp/ServerRegistry.swift` | Settings, per-server sessions, selection, profile trust and each server's route identity (`MutationOrigin`) |
-| `Sources/PveDevApp/ServerRoutes.swift` | Route checks and read-only queries bound to a captured route, including the same-named VM Start check |
-| `Sources/PveDevApp/RefreshCoordinator.swift` | Dashboards, administrator hardware inventory, image catalogs and per-server auto-refresh |
-| `Sources/PveDevApp/MutationCoordinator.swift` | The pending-request ledger and the one send path every change takes, awaited or not |
-| `Sources/PveDevApp/NoticeCenter.swift` | Transient notices bound to the server identity they describe |
-| `Tests/PveDevCoreTests/*` | Swift Testing suites |
+| `Package.swift` | SwiftPM manifest: `Hearth` executable, `HearthCore` library, `HearthCoreTests` |
+| `Sources/HearthCore/WireModels.swift` | Decodable `User`, `Budget`, `Vm`, `OperationRecord`, `DashboardResult`, `UpdatedResult` |
+| `Sources/HearthCore/WireRequests.swift` | `RpcRequest`, which encodes the tagged `action` wire format exactly |
+| `Sources/HearthCore/WireResponse.swift` | `{ok,result}` / `{ok,error}` envelope, `RpcFailure`, response interpretation |
+| `Sources/HearthCore/ProcessRunner.swift` | Bounded, cancellable child-process runner (no shell) |
+| `Sources/HearthCore/RpcClient.swift` | Builds `hearth --profile <path> rpc` invocations |
+| `Sources/HearthCore/MutationLedger.swift` | Request-ID retention and on-disk pending-request ledger |
+| `Sources/HearthCore/AppSettings.swift`, `ServerProfile.swift` | Named servers, pinned public identities, path validation and settings migration |
+| `Sources/HearthCore/FormDrafts.swift`, `Permissions.swift`, `SafeText.swift` | Form validation, visibility rules, display sanitising |
+| `Sources/HearthCore/DisplayVocabulary.swift` | Canonical display strings for wire values (Owner, Needs investigation, Completed, transfer phases) |
+| `Sources/Hearth/*` | SwiftUI app: sidebar, Servers home, VMs, Operations, Pending Requests, Users, Devices, Settings |
+| `Sources/Hearth/AppModel.swift` | The environment object pages use; composes the parts below and forwards to them |
+| `Sources/Hearth/ServerRegistry.swift` | Settings, per-server sessions, selection, profile trust and each server's route identity (`MutationOrigin`) |
+| `Sources/Hearth/ServerRoutes.swift` | Route checks and read-only queries bound to a captured route, including the same-named VM Start check |
+| `Sources/Hearth/RefreshCoordinator.swift` | Dashboards, administrator hardware inventory, image catalogs and per-server auto-refresh |
+| `Sources/Hearth/MutationCoordinator.swift` | The pending-request ledger and the one send path every change takes, awaited or not |
+| `Sources/Hearth/NoticeCenter.swift` | Transient notices bound to the server identity they describe |
+| `Tests/HearthCoreTests/*` | Swift Testing suites |
 
 ## Build, test, run
 
@@ -48,15 +48,15 @@ swift test -Xswiftc -F -Xswiftc $F -Xlinker -F -Xlinker $F \
   -Xlinker -rpath -Xlinker $F -Xlinker -rpath -Xlinker $L
 ```
 
-`swift run PveDevApp` launches the app as a bare executable. It is not a signed `.app` bundle.
+`swift run Hearth` launches the app as a bare executable. It is not a signed `.app` bundle.
 
-For local review in this workspace, `.build/PveDevApp-MultiServer.app` contains the validated release executable with an ad hoc signature. Quit the already running PveDevApp first, then run `open .build/PveDevApp-MultiServer.app` from `macos/`. This separate bundle does not replace or restart the running app. It uses the same settings domain, so the legacy profile migration applies on its first launch. It is not a distributable, Developer ID signed or notarised release.
+For local review in this workspace, `.build/Hearth-MultiServer.app` contains the validated release executable with an ad hoc signature. Quit the already running Hearth first, then run `open .build/Hearth-MultiServer.app` from `macos/`. This separate bundle does not replace or restart the running app. It uses the same settings domain, so the legacy profile migration applies on its first launch. It is not a distributable, Developer ID signed or notarised release.
 
 ## Configuration
 
 Open **Settings** (⌘,) and choose:
 
-1. **pve-devctl executable**: an absolute path to an existing executable file.
+1. **hearth executable**: an absolute path to an existing executable file.
 2. Under **Servers**, add a name and choose an absolute **Profile JSON** path for each lab controller. Other extensions, such as `.redb` or key files, are refused.
 3. Click **Save and Trust Profile**. The CLI reads the local profile and private key and returns only the public server ID, environment ID and device ID. This does not connect to a server. Every subsequent request verifies the saved IDs against the exact profile and key used for that request.
 4. Choose the active server in the sidebar, then refresh. Each server retains its own dashboard, permissions, loading indicator, errors and refresh time. There is no aggregate view.
@@ -64,7 +64,7 @@ Open **Settings** (⌘,) and choose:
 
 Settings use `UserDefaults` key `PveDevApp.settings.v2`. A previous `v1` single profile becomes **Default Server** without changing the legacy record. Inspect and trust it once before connecting. Existing pending requests have no trustworthy saved identities and remain available for review/discard; they cannot be retried. Removing a server keeps its pending requests. Changing a profile path clears its saved trust; replacing a profile or key in place causes requests to fail locally until you explicitly trust the new identity.
 
-Those profiles target independent experimental lab controllers. To observe real physical machines, use **Add Read-only Host**, choose a reviewed observation profile, and **Save and Trust Profile**. The inventory executable defaults to `pve-dev-inventory` beside `pve-devctl`; it can be chosen separately. The app stores only its path, profile paths and public host bindings. Rust runs the fixed read-only collector over strictly pinned SSH on refresh. Host observations have their own overview/VM pages and cache, with capture and refresh times. No operations, admin, create or VM-action controls exist on these pages; model/RPC configuration guards also reject mutations/retries locally. See [read-only GUI setup](../docs/read-only-gui.md). Production management still requires future backend support; this UI does not install or adopt a host.
+Those profiles target independent experimental lab controllers. To observe real physical machines, use **Add Read-only Host**, choose a reviewed observation profile, and **Save and Trust Profile**. The inventory executable defaults to `hearth-inventory` beside `hearth`; it can be chosen separately. The app stores only its path, profile paths and public host bindings. Rust runs the fixed read-only collector over strictly pinned SSH on refresh. Host observations have their own overview/VM pages and cache, with capture and refresh times. No operations, admin, create or VM-action controls exist on these pages; model/RPC configuration guards also reject mutations/retries locally. See [read-only GUI setup](../docs/read-only-gui.md). Production management still requires future backend support; this UI does not install or adopt a host.
 
 ## How the CLI is invoked
 

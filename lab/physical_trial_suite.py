@@ -15,7 +15,7 @@ import lab
 from control_suite import POLICY_FIELDS, policy_request, verify_quota_transition
 
 CAPACITY_MIB = 12288
-PORTABLE_BINARIES = ("pve-devd", "pve-dev-host", "pve-devctl")
+PORTABLE_BINARIES = ("hearthd", "hearth-host", "hearth")
 CONFIG_PATH = "/etc/pve-dev-physical-trial.json"
 
 
@@ -139,7 +139,7 @@ def run(linux_bin_dir, timeout):
     profiles = {}
 
     def invoke(actor, request, expected=None):
-        result = remote(f"/usr/local/bin/pve-devctl --profile {profiles[actor]} rpc", input=json.dumps(request), text=True, timeout=60, allow_failure=True)
+        result = remote(f"/usr/local/bin/hearth --profile {profiles[actor]} rpc", input=json.dumps(request), text=True, timeout=60, allow_failure=True)
         if not result.stdout:
             raise RuntimeError(f"Portable loopback iroh client failed: {result.stderr}")
         response = json.loads(result.stdout)
@@ -211,7 +211,7 @@ print(json.dumps({"dataset":dataset,"zfs":zfs,"configs":configs,"storage":storag
                 config = trial_config(nonce, pool_guid, root_guid, machine_digest)
                 save("scope", config)
                 remote(f"cat >{CONFIG_PATH} && chmod 600 {CONFIG_PATH}", input=json.dumps(config), text=True, timeout=45)
-                for name, path in (("pve-dev-host", "/usr/local/sbin/pve-dev-host"), ("pve-devd", "/usr/local/bin/pve-devd"), ("pve-devctl", "/usr/local/bin/pve-devctl")):
+                for name, path in (("hearth-host", "/usr/local/sbin/hearth-host"), ("hearthd", "/usr/local/bin/hearthd"), ("hearth", "/usr/local/bin/hearth")):
                     remote(f"cat >{path} && chmod 755 {path}", input=(directory / "bin" / name).read_bytes(), timeout=180)
                 remote("set -e; useradd --system --home-dir /var/lib/pve-dev --shell /usr/sbin/nologin pve-dev; install -d -m 0750 -o root -g pve-dev /run/pve-dev-host; install -d -m 0700 -o pve-dev -g pve-dev /var/lib/pve-dev; install -d -m 0700 /root/pve-dev-mode-clients", text=True, timeout=45)
                 helper_unit = f'''[Unit]
@@ -220,7 +220,7 @@ After=pve-cluster.service
 User=root
 Group=pve-dev
 UMask=0077
-ExecStart=/usr/local/sbin/pve-dev-host serve --state-dir /var/lib/pve-dev-host --socket /run/pve-dev-host/control.sock --physical-trial-config {CONFIG_PATH}
+ExecStart=/usr/local/sbin/hearth-host serve --state-dir /var/lib/pve-dev-host --socket /run/pve-dev-host/control.sock --physical-trial-config {CONFIG_PATH}
 Restart=on-failure
 RestartSec=2
 KillMode=control-group
@@ -232,7 +232,7 @@ After=pve-dev-host.service
 User=pve-dev
 Group=pve-dev
 UMask=0077
-ExecStart=/usr/local/bin/pve-devd serve --data-dir /var/lib/pve-dev/controller
+ExecStart=/usr/local/bin/hearthd serve --data-dir /var/lib/pve-dev/controller
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=true
@@ -249,8 +249,8 @@ KillMode=control-group
                 remote("systemctl daemon-reload && systemctl start pve-dev-host.service", text=True, timeout=45)
                 identities = {}
                 for actor in ("admin", "member", "unknown"):
-                    identities[actor] = json.loads(remote(f"/usr/local/bin/pve-devctl identity new --path /root/pve-dev-mode-clients/{actor}.key", text=True, timeout=45).stdout)["endpoint_id"]
-                remote(f"/usr/local/bin/pve-devd init --data-dir /var/lib/pve-dev/controller --admin {identities['admin']} --environment {nonce} --host-socket /run/pve-dev-host/control.sock --backend physical_trial --physical-trial-config {CONFIG_PATH} --network loopback --port 7777 --disk-capacity-mib {CAPACITY_MIB} --min-memory-capacity-mib 1024 && chown -R pve-dev:pve-dev /var/lib/pve-dev/controller && systemctl start pve-dev-controller.service", text=True, timeout=90)
+                    identities[actor] = json.loads(remote(f"/usr/local/bin/hearth identity new --path /root/pve-dev-mode-clients/{actor}.key", text=True, timeout=45).stdout)["endpoint_id"]
+                remote(f"/usr/local/bin/hearthd init --data-dir /var/lib/pve-dev/controller --admin {identities['admin']} --environment {nonce} --host-socket /run/pve-dev-host/control.sock --backend physical_trial --physical-trial-config {CONFIG_PATH} --network loopback --port 7777 --disk-capacity-mib {CAPACITY_MIB} --min-memory-capacity-mib 1024 && chown -R pve-dev:pve-dev /var/lib/pve-dev/controller && systemctl start pve-dev-controller.service", text=True, timeout=90)
                 deadline = time.monotonic() + 180
                 descriptor = None
                 while time.monotonic() < deadline:
@@ -264,7 +264,7 @@ KillMode=control-group
                     raise RuntimeError("Physical loopback controller did not become ready")
                 for actor in identities:
                     profiles[actor] = f"/root/pve-dev-mode-clients/{actor}.json"
-                    remote(f"/usr/local/bin/pve-devctl profile --identity /root/pve-dev-mode-clients/{actor}.key --server /var/lib/pve-dev/controller/server.json --expected-server {descriptor['endpoint']['id']} --direct-address 127.0.0.1:7777 --output {profiles[actor]}", text=True, timeout=45)
+                    remote(f"/usr/local/bin/hearth profile --identity /root/pve-dev-mode-clients/{actor}.key --server /var/lib/pve-dev/controller/server.json --expected-server {descriptor['endpoint']['id']} --direct-address 127.0.0.1:7777 --output {profiles[actor]}", text=True, timeout=45)
                 for pending in invoke("admin", {"action": "dashboard"})["operations"]:
                     operation(pending)
                 invoke("unknown", {"action": "dashboard"}, "forbidden")
@@ -389,7 +389,7 @@ print(json.dumps({"config":json.loads(call("pvesh","get","/nodes/pve-lab/qemu/10
                 save("configured-vm-after-nonstorage", final_policy)
                 summary["quota_growth_contraction_verified"] = True
                 check("actual_contraction_in_use_refusals_history_and_vm_configuration_preservation")
-                provenance = json.loads(remote("/usr/local/sbin/pve-dev-host provenance --socket /run/pve-dev-host/control.sock", text=True, timeout=60).stdout)["resources"]
+                provenance = json.loads(remote("/usr/local/sbin/hearth-host provenance --socket /run/pve-dev-host/control.sock", text=True, timeout=60).stdout)["resources"]
                 if provenance["binding"]["physical_trial"]["scope"] != config["scope"] or provenance["unsettled_jobs"]:
                     raise RuntimeError("Helper provenance does not attest the exact settled scope")
                 if provenance["machines"]["9001"]["state"] != "present":
@@ -421,18 +421,18 @@ print(json.dumps({"config":json.loads(call("pvesh","get","/nodes/pve-lab/qemu/10
 
                 remote(f"zfs set org.pve-dev:trial=wrong-marker {root_dataset}", text=True, timeout=45)
                 try:
-                    refused = remote("/usr/local/sbin/pve-dev-host health --socket /run/pve-dev-host/control.sock", allow_failure=True, text=True, timeout=60)
+                    refused = remote("/usr/local/sbin/hearth-host health --socket /run/pve-dev-host/control.sock", allow_failure=True, text=True, timeout=60)
                     if refused.returncode == 0:
                         raise RuntimeError("Actual root marker drift was accepted")
                     save("root-marker-refused", {"returncode": refused.returncode, "error": refused.stderr})
                 finally:
                     remote(f"zfs set org.pve-dev:trial={nonce} {root_dataset}", text=True, timeout=45)
-                remote("/usr/local/sbin/pve-dev-host health --socket /run/pve-dev-host/control.sock", text=True, timeout=60)
+                remote("/usr/local/sbin/hearth-host health --socket /run/pve-dev-host/control.sock", text=True, timeout=60)
                 remote("systemctl stop pve-dev-controller.service pve-dev-host.service", text=True, timeout=90)
                 bad_config = json.loads(json.dumps(config))
                 bad_config["scope"]["root_guid"] = str(int(root_guid) + 1)
                 remote("cat >/etc/pve-dev-physical-trial-bad.json && chmod 600 /etc/pve-dev-physical-trial-bad.json", input=json.dumps(bad_config), text=True, timeout=45)
-                refused = remote("/usr/local/sbin/pve-dev-host serve --state-dir /var/lib/pve-dev-host --socket /run/pve-dev-host/bad.sock --physical-trial-config /etc/pve-dev-physical-trial-bad.json", allow_failure=True, text=True, timeout=60)
+                refused = remote("/usr/local/sbin/hearth-host serve --state-dir /var/lib/pve-dev-host --socket /run/pve-dev-host/bad.sock --physical-trial-config /etc/pve-dev-physical-trial-bad.json", allow_failure=True, text=True, timeout=60)
                 if refused.returncode == 0 or "journal is bound" not in refused.stderr:
                     raise RuntimeError("Changed immutable scope was not refused before helper activation")
                 save("changed-scope-refused", {"returncode": refused.returncode, "error": refused.stderr})
@@ -451,12 +451,12 @@ print(json.dumps({"config":json.loads(call("pvesh","get","/nodes/pve-lab/qemu/10
                 check("actual_root_marker_and_immutable_scope_refusal_and_reopen")
 
                 remote("systemctl stop pve-dev-controller.service", text=True, timeout=60)
-                ledger = json.loads(remote(f"/usr/local/bin/pve-devd inspect-offline --data-dir /var/lib/pve-dev/controller --expected-server {descriptor['endpoint']['id']} --expected-environment {nonce}", text=True, timeout=60).stdout)
+                ledger = json.loads(remote(f"/usr/local/bin/hearthd inspect-offline --data-dir /var/lib/pve-dev/controller --expected-server {descriptor['endpoint']['id']} --expected-environment {nonce}", text=True, timeout=60).stdout)
                 if any(item["status"] != "verified" for item in ledger["operations"]):
                     raise RuntimeError("Stopped catalog has unsettled operations")
                 if any(item["state"] != "deleted" for item in ledger["vms"]):
                     raise RuntimeError("Stopped catalog retains an active managed VM")
-                final_provenance = json.loads(remote("/usr/local/sbin/pve-dev-host provenance --socket /run/pve-dev-host/control.sock", text=True, timeout=60).stdout)["resources"]
+                final_provenance = json.loads(remote("/usr/local/sbin/hearth-host provenance --socket /run/pve-dev-host/control.sock", text=True, timeout=60).stdout)["resources"]
                 if final_provenance["unsettled_jobs"] or final_provenance["owners"]["trial-user"]["state"] != "deleted":
                     raise RuntimeError("Helper proof is not settled/deleted")
                 if final_provenance["machines"]["9001"]["state"] != "deleted":
@@ -484,7 +484,7 @@ def call(*args): return subprocess.check_output(args,text=True)
                     raise RuntimeError("Physical backend changed or depended on the sealed lab ID")
                 if remote("zfs get -Hp -o value org.pve-dev:lab labpool", text=True, timeout=45).stdout.strip() != base_info["nonce"]:
                     raise RuntimeError("Physical backend changed the pool-wide lab marker")
-                actual_hashes = remote("sha256sum /usr/local/bin/pve-devd /usr/local/sbin/pve-dev-host /usr/local/bin/pve-devctl", text=True, timeout=45).stdout.splitlines()
+                actual_hashes = remote("sha256sum /usr/local/bin/hearthd /usr/local/sbin/hearth-host /usr/local/bin/hearth", text=True, timeout=45).stdout.splitlines()
                 if {pathlib.PurePosixPath(line.split()[1]).name: line.split()[0] for line in actual_hashes} != hashes:
                     raise RuntimeError("Executed portable artifacts changed during qualification")
                 save("final-inventory", {"vms": inventory, "scoped_filesystems": descendants,

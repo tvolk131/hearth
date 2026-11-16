@@ -72,22 +72,22 @@ def main():
 
         identities = {}
         profiles = {}
-        client = binaries / "pve-devctl"
+        client = binaries / "hearth"
         for name in ("erin", "frank", "unknown"):
             identity = directory / f"{name}.key"
             identities[name] = json.loads(command(client, "identity", "new", "--path", identity).stdout)["endpoint_id"]
             profiles[name] = directory / f"{name}.json"
 
-        host_command = [binaries / "pve-dev-host", "serve", "--state-dir", directory / "host", "--socket", directory / "host.sock", "--simulate", "--environment", environment]
+        host_command = [binaries / "hearth-host", "serve", "--state-dir", directory / "host", "--socket", directory / "host.sock", "--simulate", "--environment", environment]
         helper = start("helper", host_command)
         wait_for(lambda: (directory / "host.sock").exists(), "helper socket")
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         state = directory / "controller"
-        command(binaries / "pve-devd", "init", "--data-dir", state, "--admin", identities["erin"], "--environment", environment,
+        command(binaries / "hearthd", "init", "--data-dir", state, "--admin", identities["erin"], "--environment", environment,
                 "--host-socket", directory / "host.sock", "--backend", "simulated", "--port", port)
-        daemon_command = [binaries / "pve-devd", "serve", "--data-dir", state]
+        daemon_command = [binaries / "hearthd", "serve", "--data-dir", state]
         daemon = start("daemon", daemon_command)
         descriptor = state / "server.json"
         wait_for(lambda: descriptor.exists(), "controller descriptor")
@@ -196,7 +196,7 @@ def main():
             helper.wait(timeout=10)
             helper = start("helper-policy-restarted", host_command)
             def policy_helper_ready():
-                probe = subprocess.run([str(binaries / "pve-dev-host"), "health", "--socket", str(directory / "host.sock")],
+                probe = subprocess.run([str(binaries / "hearth-host"), "health", "--socket", str(directory / "host.sock")],
                                        capture_output=True, text=True, timeout=8)
                 return probe.returncode == 0 and json.loads(probe.stdout)["environment"] == environment
             wait_for(policy_helper_ready, "policy helper restart")

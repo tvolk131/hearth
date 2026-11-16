@@ -14,7 +14,7 @@ Type=simple
 User=root
 Group=pve-dev
 UMask=0077
-ExecStart=/usr/local/libexec/pve-dev/pve-dev-host serve --state-dir /var/lib/pve-dev-host --socket /run/pve-dev-host/host.sock --lab-config /etc/pve-dev-host/lab.json
+ExecStart=/usr/local/libexec/pve-dev/hearth-host serve --state-dir /var/lib/pve-dev-host --socket /run/pve-dev-host/host.sock --lab-config /etc/pve-dev-host/lab.json
 Restart=on-failure
 RestartSec=5s
 # The helper drains for up to 15 minutes (SHUTDOWN_GRACE) on SIGTERM. Only

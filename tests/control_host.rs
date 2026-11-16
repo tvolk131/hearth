@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use pve_dev::control::{
+use hearth::control::{
     host::{
         CONTROL_DATASET, Fault, FaultPoint, Host, HostConfig, HostRequest, HostResponse, MIB,
         MachineState, Phase, SimulatedWorld, Step, World, parse_task, rpc, serve, valid_upid,
@@ -20,7 +20,7 @@ type Drift = Box<dyn Fn(&mut World)>;
 
 fn bootable() -> Vm {
     let mut vm = machine(9001, "alice", "guest", 32);
-    vm.guest = Some(Box::new(pve_dev::control::protocol::Guest {
+    vm.guest = Some(Box::new(hearth::control::protocol::Guest {
         image_sha256: "a".repeat(64),
         ssh_public_key:
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGT3dRd3uA9zT/qLn2AsdPk+8AtrOaE1abxprqSEusfe"
@@ -160,10 +160,10 @@ async fn guest_key_image_or_network_drift_never_authorizes_start() {
 fn guest_plan_cannot_be_downgraded_to_blank_disk_creation() {
     let alice = user("alice", 128);
     assert!(
-        pve_dev::control::host::validate(&job("bad", "create", &alice, Some(bootable()))).is_err()
+        hearth::control::host::validate(&job("bad", "create", &alice, Some(bootable()))).is_err()
     );
     assert!(
-        pve_dev::control::host::validate(&job(
+        hearth::control::host::validate(&job(
             "bad",
             "create_guest",
             &alice,
@@ -172,12 +172,12 @@ fn guest_plan_cannot_be_downgraded_to_blank_disk_creation() {
         .is_err()
     );
     assert!(
-        !pve_dev::control::host::plan(pve_dev::control::JobKind::Create)
+        !hearth::control::host::plan(hearth::control::JobKind::Create)
             .unwrap()
             .contains(&Step::Image)
     );
     assert!(
-        pve_dev::control::host::plan(pve_dev::control::JobKind::CreateGuest)
+        hearth::control::host::plan(hearth::control::JobKind::CreateGuest)
             .unwrap()
             .contains(&Step::Image)
     );
@@ -287,7 +287,7 @@ fn user(name: &str, budget_mib: u64) -> User {
         max_vms: 4,
         ready: false,
         policy_revision: 0,
-        state: pve_dev::control::protocol::AccountState::Active,
+        state: hearth::control::protocol::AccountState::Active,
     }
 }
 
@@ -670,7 +670,7 @@ async fn preflight_refuses_unknown_vms_and_volume_collisions() {
         );
         world.vms.insert(
             9001,
-            pve_dev::control::host::SimulatedVm {
+            hearth::control::host::SimulatedVm {
                 config,
                 pending_config: Default::default(),
                 running: false,
@@ -1494,7 +1494,7 @@ fn job_fingerprint_is_canonical_and_versioned() {
     let mut expected = <sha2::Sha256 as sha2::Digest>::new();
     sha2::Digest::update(&mut expected, b"hearth-job-v1\n");
     sha2::Digest::update(&mut expected, &canonical);
-    let fingerprint = pve_dev::control::host::fingerprint(&job).unwrap();
+    let fingerprint = hearth::control::host::fingerprint(&job).unwrap();
     assert_eq!(
         fingerprint,
         format!("{:x}", sha2::Digest::finalize(expected))

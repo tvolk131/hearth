@@ -7,15 +7,15 @@ The project history, including dated validation runs, is in [CHANGELOG.md](../CH
 ## Components and authority
 
 ```text
-SwiftUI app ── typed JSON over stdin/stdout ── pve-devctl
+SwiftUI app ── typed JSON over stdin/stdout ── hearth
                                                │
                                 authenticated iroh/QUIC
                                                │
-                                     pve-devd (non-root)
+                                     hearthd (non-root)
                                       │              │
                               state.redb       restricted Unix socket
                                                      │
-                                            pve-dev-host (root)
+                                            hearth-host (root)
                                               │            │
                                         helper redb    Proxmox + ZFS
 ```
@@ -41,7 +41,7 @@ Not every external failure can be retried safely. An uncertain effect without su
 
 The helper sorts every step failure into one of three classes. **Retryable** failures (reads, observations and command transport while no effect intent is outstanding) back off from 2 s, doubling to at most 60 s, and block only once one step has kept failing for 30 minutes. The first-failure time and attempt count are journaled, so the budget survives restarts. **Permanent** refusals (validation, admission) block with that class recorded. Everything else is **ambiguous** and blocks as before. When an effect command itself returns an error, the helper reconciles it exactly like a crash: it observes once and verifies only on an exact match, otherwise it blocks. When `submit` refuses a job before journaling it, the helper returns the typed wire code `rejected`. The controller then ends the operation as terminal `failed` with the helper's reason and releases its claims; transport failures still leave it queued. Only the local helper's typed ambiguity moves a not-yet-committed migration to blocked; a peer's error text never does. On SIGTERM/SIGINT the helper starts no new step and lets the step in flight finish (up to 15 minutes); a second signal exits immediately. The service manager's stop timeout must exceed that grace period.
 
-Do not delete or reinitialize either database to clear a blocked operation. Loss of one database is not a clean slate. Stop both services and preserve both journals and the actual infrastructure for investigation. `pve-dev-ops` now supports a paired offline logical export and a fresh, quarantined restore; see `deployment-recovery.md`. Both startup paths refuse restored state pending independent infrastructure reconciliation. Reconciliation and restore activation remain unimplemented; copying a live database is not a supported backup.
+Do not delete or reinitialize either database to clear a blocked operation. Loss of one database is not a clean slate. Stop both services and preserve both journals and the actual infrastructure for investigation. `hearth-ops` now supports a paired offline logical export and a fresh, quarantined restore; see `deployment-recovery.md`. Both startup paths refuse restored state pending independent infrastructure reconciliation. Reconciliation and restore activation remain unimplemented; copying a live database is not a supported backup.
 
 ## Resource policy
 
@@ -59,23 +59,23 @@ Build from the repository root with `cargo build --locked --bins`, or with `nix 
 
 ```sh
 export PATH="$PWD/target/debug:$PATH"
-pve-devctl identity new --path /absolute/private/device.key
-pve-devctl identity show --path /absolute/private/device.key
-pve-devctl profile --identity /absolute/private/device.key \
+hearth identity new --path /absolute/private/device.key
+hearth identity show --path /absolute/private/device.key
+hearth profile --identity /absolute/private/device.key \
   --server /trusted/server.json --expected-server VERIFIED_PUBLIC_KEY \
   --output /absolute/private/lab-profile.json
 
-pve-devctl --profile /absolute/private/lab-profile.json dashboard
-pve-devctl --profile /absolute/private/lab-profile.json budget
-pve-devctl --profile /absolute/private/lab-profile.json vm list
-pve-devctl --profile /absolute/private/lab-profile.json vm create \
+hearth --profile /absolute/private/lab-profile.json dashboard
+hearth --profile /absolute/private/lab-profile.json budget
+hearth --profile /absolute/private/lab-profile.json vm list
+hearth --profile /absolute/private/lab-profile.json vm create \
   --request-id SAME_ID_ON_RETRY --name dev-frank --disk-mib 32
-pve-devctl --profile /absolute/private/lab-profile.json operations
-pve-devctl --profile /absolute/private/lab-profile.json vm start \
+hearth --profile /absolute/private/lab-profile.json operations
+hearth --profile /absolute/private/lab-profile.json vm start \
   --request-id ANOTHER_ID --vm-id 9001
-pve-devctl --profile /absolute/private/lab-profile.json vm stop \
+hearth --profile /absolute/private/lab-profile.json vm stop \
   --request-id STOP_ID --vm-id 9001
-pve-devctl --profile /absolute/private/lab-profile.json vm delete \
+hearth --profile /absolute/private/lab-profile.json vm delete \
   --request-id DELETE_ID --vm-id 9001 --confirm-delete
 ```
 
@@ -83,7 +83,7 @@ Verify the server key and environment through a trusted channel before creating 
 
 Device enrollment uses new iroh identities, not the existing SSH keys. SSH access to a guest is separate from permission to manage that guest. There is no automatic import of the three existing production users or VMs.
 
-`pve-dev-inventory` provides a separate read-only inventory and explicit ownership-mapping workflow (`discovery.md`). Its dedicated redb file stores observations only: even a confirmed import never creates controller users, VMs or operations, and never authorizes management. It is not a production adoption/write path.
+`hearth-inventory` provides a separate read-only inventory and explicit ownership-mapping workflow (`discovery.md`). Its dedicated redb file stores observations only: even a confirmed import never creates controller users, VMs or operations, and never authorizes management. It is not a production adoption/write path.
 
 ## Rerunnable tests
 
@@ -97,7 +97,7 @@ nix develop ./nix --command python3 scripts/test-control-local.py --swift
 
 The process suite starts real local daemon/helper/client processes with a simulated host backend, authenticates devices over loopback iroh, kills/restarts the daemon after durable acceptance, restarts the helper, checks duplicate request identity and live revocation, and cleans up its private temporary directory. `--swift` additionally builds the debug/release macOS app and runs its tests against the live Rust CLI, including an idempotent create request. It requires macOS Command Line Tools or Xcode. The helper's unit tests separately inject crashes around external effects and exercise ambiguous-state blocking.
 
-To try the GUI without a hypervisor, add `--serve` to the process suite. It prints the CLI executable and temporary administrator profile paths and keeps the simulated services alive until Ctrl-C. In another terminal, run `cd macos && /usr/bin/swift run PveDevApp`, then select those paths in Settings and refresh. This does not start QEMU or contact any Proxmox server. Closing the demo invalidates its profiles and deletes its temporary keys/state; it is not a persistent management environment.
+To try the GUI without a hypervisor, add `--serve` to the process suite. It prints the CLI executable and temporary administrator profile paths and keeps the simulated services alive until Ctrl-C. In another terminal, run `cd macos && /usr/bin/swift run Hearth`, then select those paths in Settings and refresh. This does not start QEMU or contact any Proxmox server. Closing the demo invalidates its profiles and deletes its temporary keys/state; it is not a persistent management environment.
 
 For the real disposable Proxmox adapter:
 

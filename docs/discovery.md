@@ -1,6 +1,6 @@
 # Read-only discovery and observation import
 
-`pve-dev-inventory` (library: `pve_dev::discovery`) is an **observation-only** phase. It:
+`hearth-inventory` (library: `hearth::discovery`) is an **observation-only** phase. It:
 
 - prints a fixed, read-only Python collector and the exact SSH command an operator can run;
 - validates collector output offline against an explicit host pin;
@@ -12,7 +12,7 @@ The original offline workflow below never opens a network connection or runs SSH
 ## Workflow
 
 ```sh
-B=target/debug/pve-dev-inventory
+B=target/debug/hearth-inventory
 $B collector > /secure/collector.py            # review it; optional --zfs-root rpool/data
 $B ssh-command --destination root@HOST --known-hosts /abs/known_hosts \
    [--identity /abs/key] --collector /secure/collector.py --output /secure/snap.json

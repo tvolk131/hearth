@@ -1,6 +1,6 @@
 # Offline recovery and service templates
 
-`pve-dev-ops` provides a paired offline export, verification and **quarantined**
+`hearth-ops` provides a paired offline export, verification and **quarantined**
 restore of a stopped controller/helper pair, plus the `prepare-adoption` step
 used by the managed backend (see [persistent-management.md](persistent-management.md)).
 The repository also ships lab systemd unit templates in
@@ -12,7 +12,7 @@ simulated backend for local tests.
 
 ## What is backed up
 
-`pve-dev-ops backup` exclusively opens **both** stopped redb databases before
+`hearth-ops backup` exclusively opens **both** stopped redb databases before
 reading either logical record, and holds both locks through export. It exports
 the controller catalog, complete helper journal, controller configuration and
 server identity key together in one new private directory. A simulated backend
@@ -24,7 +24,7 @@ keys, resource claims and VM tombstones. The journal includes frozen jobs,
 fingerprints, resource identities and task receipts. Validation compares actual
 frozen operation payloads, requires helper evidence for every controller
 terminal result, refuses helper jobs absent from the controller (except
-finished jobs whose operation was archived by `pve-dev-ops prune` and survives
+finished jobs whose operation was archived by `hearth-ops prune` and survives
 as a request-ID tombstone; see `storage-retention.md`), and verifies
 binding, server public identity and pool GUID against independent expected
 pins. A helper may legitimately be ahead of an unfinished controller operation.
@@ -55,16 +55,16 @@ Record the quiescence procedure/task evidence alongside the separate receipt.
 Examples (placeholders must come from independently recorded setup information):
 
 ```sh
-pve-dev-ops backup --controller-dir /var/lib/pve-dev/controller \
+hearth-ops backup --controller-dir /var/lib/pve-dev/controller \
   --helper-dir /var/lib/pve-dev-host --output /secure/new-backup \
   --external-effects-quiesced --expected-environment ENVIRONMENT \
   --expected-server SERVER_PUBLIC_ID --expected-pool-guid POOL_GUID
 
-pve-dev-ops verify --bundle /secure/new-backup --expected-bundle RECEIPT_SHA256 \
+hearth-ops verify --bundle /secure/new-backup --expected-bundle RECEIPT_SHA256 \
   --expected-environment ENVIRONMENT --expected-server SERVER_PUBLIC_ID \
   --expected-pool-guid POOL_GUID
 
-pve-dev-ops restore --bundle /secure/new-backup --output /secure/new-restore \
+hearth-ops restore --bundle /secure/new-backup --output /secure/new-restore \
   --expected-bundle RECEIPT_SHA256 --expected-environment ENVIRONMENT \
   --expected-server SERVER_PUBLIC_ID --expected-pool-guid POOL_GUID
 ```
@@ -132,8 +132,8 @@ sequence is:
 1. Verify the recorded binary/unit hashes and executable provenance; create a
    system `pve-dev` group/account with no login shell or home. Do not grant
    sudo/PVE roles.
-2. Install `pve-devd` and `pve-dev-host` (which the units run), plus
-   `pve-devctl` and `pve-dev-ops` for administration, under root-owned
+2. Install `hearthd` and `hearth-host` (which the units run), plus
+   `hearth` and `hearth-ops` for administration, under root-owned
    `/usr/local/libexec/pve-dev/` (0755), and the units under
    `/etc/systemd/system/` (0644). The binary directory must not be writable by
    the daemon account.
@@ -141,11 +141,11 @@ sequence is:
    reviewed nonce/pool-GUID/image allowlist `lab.json` (0600). Preserve image
    hashes, identity and pool pins; initialization is not an upgrade operation.
 4. Create `/var/lib/pve-dev` owned by `pve-dev` (0700), then run the existing
-   `pve-devd init` **as that account** to create its new `controller/` with the
+   `hearthd init` **as that account** to create its new `controller/` with the
    exact lab binding, socket `/run/pve-dev-host/host.sock`, admin public key and
    explicitly chosen transport. Keep the default loopback route until tested.
 5. Run `systemd-analyze verify` on both units, `systemctl daemon-reload`, start
-   the helper, inspect `pve-dev-host health`, then start the daemon. Validate
+   the helper, inspect `hearth-host health`, then start the daemon. Validate
    actual socket mode/ownership, unprivileged daemon UID, descriptor identity,
    enrollment, auth refusal and a disposable VM lifecycle before enabling boot.
    Enabling services is a separate operational step after these checks.

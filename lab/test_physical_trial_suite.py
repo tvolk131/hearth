@@ -91,7 +91,7 @@ class PhysicalModeFixtureTests(unittest.TestCase):
             self.assertEqual(hashes, expected)
             self.assertEqual(set(hashes), set(PORTABLE_BINARIES))
             self.assertEqual(source_hash, "f" * 64)
-            (source / "pve-devctl").write_bytes(b"native Mac binary")
+            (source / "hearth").write_bytes(b"native Mac binary")
             with self.assertRaisesRegex(RuntimeError, "ELF"):
                 freeze_binaries(source, root / "wrong-architecture")
 
@@ -101,10 +101,10 @@ class PhysicalModeFixtureTests(unittest.TestCase):
             source = root / "source"
             source.mkdir()
             self.fixture_binaries(source)
-            with (source / "pve-devd").open("ab") as stream:
+            with (source / "hearthd").open("ab") as stream:
                 stream.write(b"tamper")
             with self.assertRaisesRegex(RuntimeError, "manifest"):
                 freeze_binaries(source, root / "tampered")
-            (source / "pve-devctl").unlink()
+            (source / "hearth").unlink()
             with self.assertRaises(FileNotFoundError):
                 freeze_binaries(source, root / "missing-client")

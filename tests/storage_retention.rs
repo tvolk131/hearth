@@ -9,8 +9,7 @@ use std::{
 };
 
 use anyhow::bail;
-use iroh::SecretKey;
-use pve_dev::control::{
+use hearth::control::{
     host::{Host, HostConfig, HostRequest},
     maintenance::{self, Pins, PruneStage},
     persist::{self, Layout},
@@ -19,6 +18,7 @@ use pve_dev::control::{
     store::{Binding, Store},
     transport::{self, Network, ServerConfig},
 };
+use iroh::SecretKey;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition, TableHandle};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -286,7 +286,7 @@ fn audit_listing_is_admin_only_and_pages_in_sequence_order() {
 #[test]
 fn dashboard_includes_all_unfinished_work_and_bounded_history() {
     let (_directory, store, admin) = controller();
-    let bound = pve_dev::control::store::DASHBOARD_TERMINAL_OPERATIONS;
+    let bound = hearth::control::store::DASHBOARD_TERMINAL_OPERATIONS;
     let vm_id = history(&store, &admin, bound + 5);
     // One unfinished operation must always be shown.
     store

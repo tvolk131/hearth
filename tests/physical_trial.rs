@@ -1,14 +1,14 @@
-use pve_dev::control::JobKind;
+use hearth::control::JobKind;
 use std::collections::{BTreeMap, BTreeSet};
 
-use iroh::SecretKey;
-use pve_dev::control::{
+use hearth::control::{
     host::{Host, HostBinding, HostConfig, HostRequest},
     physical_trial::{TrialBinding, TrialScope},
     protocol::{OperationStatus, Request, ResourceLimits, Role, VmAction, VmState},
     store::{Binding, Store},
     transport::{self, Network, ServerConfig},
 };
+use iroh::SecretKey;
 use redb::ReadableTable;
 use serde_json::{Value, json};
 
@@ -706,7 +706,7 @@ fn physical_schema_downgrade_fence_survives_policy_and_deletion_transitions() {
     assert_eq!(store.read().unwrap().schema, 4);
     assert_eq!(
         store.read().unwrap().users["trial-user"].state,
-        pve_dev::control::protocol::AccountState::Deleted
+        hearth::control::protocol::AccountState::Deleted
     );
     drop(store);
     let db = redb::Database::open(root.path().join("state.redb")).unwrap();
@@ -819,7 +819,7 @@ fn physical_controller_transport_cannot_be_reopened_with_public_routing() {
 
 #[tokio::test]
 async fn offline_physical_binding_restore_preserves_scope_and_stays_quarantined() {
-    use pve_dev::control::{
+    use hearth::control::{
         host::BackendConfig,
         maintenance::{self, Pins},
     };
@@ -860,7 +860,7 @@ async fn offline_physical_binding_restore_preserves_scope_and_stays_quarantined(
         managed: None,
     };
     let database = Database::open(helper.join("host-journal.redb")).unwrap();
-    pve_dev::control::persist::write_journal(&database, &journal).unwrap();
+    hearth::control::persist::write_journal(&database, &journal).unwrap();
     drop(database);
     let (_, store, key) = transport::open(&controller).unwrap();
     drop(store);
@@ -913,7 +913,7 @@ fn offline_inspection_requires_identity_pins_and_preserves_existing_ledger() {
     let before = serde_json::to_value(store.read().unwrap()).unwrap();
     drop(store);
     let run = |path: &std::path::Path, server: &str, environment: &str| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_pve-devd"))
+        std::process::Command::new(env!("CARGO_BIN_EXE_hearthd"))
             .arg("inspect-offline")
             .arg("--data-dir")
             .arg(path)
@@ -990,7 +990,7 @@ async fn historical_out_of_scope_jobs_do_not_make_the_journal_unreadable() {
             .is_err()
     );
     journal.jobs.get_mut("historical").unwrap().status = OperationStatus::Verified;
-    pve_dev::control::host::validate_scope(&journal).expect("finished history stays readable");
+    hearth::control::host::validate_scope(&journal).expect("finished history stays readable");
     // Unfinished work, including a blocked job an administrator may resume,
     // must still fit the scope.
     for unfinished in [
@@ -999,7 +999,7 @@ async fn historical_out_of_scope_jobs_do_not_make_the_journal_unreadable() {
         OperationStatus::Blocked,
     ] {
         journal.jobs.get_mut("historical").unwrap().status = unfinished.clone();
-        let error = pve_dev::control::host::validate_scope(&journal).unwrap_err();
+        let error = hearth::control::host::validate_scope(&journal).unwrap_err();
         assert!(
             format!("{error:#}").contains("escapes explicit physical trial scope"),
             "{unfinished:?}: {error:#}"

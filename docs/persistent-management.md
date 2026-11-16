@@ -1,6 +1,6 @@
 # Persistent management
 
-The `managed` backend runs an unprivileged `pve-devd` and a separate root `pve-dev-host` helper on each independent Proxmox host. The macOS app connects directly through authenticated iroh RPC. Client profiles pin the server identity, environment and administrator device identity. There is no shared database or consensus group between hosts.
+The `managed` backend runs an unprivileged `hearthd` and a separate root `hearth-host` helper on each independent Proxmox host. The macOS app connects directly through authenticated iroh RPC. Client profiles pin the server identity, environment and administrator device identity. There is no shared database or consensus group between hosts.
 
 The November 12 deployment uses a separate application, settings suite and request ledger:
 
@@ -52,9 +52,9 @@ An unclean service shutdown can require redb's native recovery. The repair comma
 
 ## State backups and restarts
 
-The operator tooling that installed and adopted the managed deployments was never committed to this repository. The historical V6 deployment was recorded by `deployment/persistent_management.py`, and the fleet generation used `deployment/managed_adoption.py` with exact saved plan digests, frozen artifacts and a `managed_adoption_status_worker.py` status worker. This repository contains the Rust side: the managed backend (`src/control/managed.rs`, `src/control/adoption.rs`) and `pve-dev-ops prepare-adoption`.
+The operator tooling that installed and adopted the managed deployments was never committed to this repository. The historical V6 deployment was recorded by `deployment/persistent_management.py`, and the fleet generation used `deployment/managed_adoption.py` with exact saved plan digests, frozen artifacts and a `managed_adoption_status_worker.py` status worker. This repository contains the Rust side: the managed backend (`src/control/managed.rs`, `src/control/adoption.rs`) and `hearth-ops prepare-adoption`.
 
-Adoption works as follows. The adoption worker first verifies the previous installation, closes management admission, refuses unfinished work and relevant active Proxmox tasks, stops only the owned helper/controller, and retains cold state plus a verified paired backup. `pve-dev-ops prepare-adoption` then writes a fresh quarantined pair from that backup and a hash-pinned managed configuration, retaining all identities, accepted requests, jobs and historical records. Independent live reconciliation authorizes that specific adoption stage before replacing only the owned databases, configurations and binaries. This is not generic activation of restored backups. Exclusive intents and retained evidence prevent blind replay after an incomplete activation.
+Adoption works as follows. The adoption worker first verifies the previous installation, closes management admission, refuses unfinished work and relevant active Proxmox tasks, stops only the owned helper/controller, and retains cold state plus a verified paired backup. `hearth-ops prepare-adoption` then writes a fresh quarantined pair from that backup and a hash-pinned managed configuration, retaining all identities, accepted requests, jobs and historical records. Independent live reconciliation authorizes that specific adoption stage before replacing only the owned databases, configurations and binaries. This is not generic activation of restored backups. Exclusive intents and retained evidence prevent blind replay after an incomplete activation.
 
 In the deployed fleet, status, restart and backup plans live under each environment's `fleet-v1/status` directory. The status worker verifies the installed binary/unit/configuration pins and includes adopted VM IDs when checking active external tasks.
 

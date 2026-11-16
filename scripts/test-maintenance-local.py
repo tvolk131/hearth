@@ -57,10 +57,10 @@ def main():
                 time.sleep(0.1)
             raise TimeoutError("local fixture failed to become ready")
 
-        client = binary / "pve-devctl"
-        daemon_bin = binary / "pve-devd"
-        helper_bin = binary / "pve-dev-host"
-        ops = binary / "pve-dev-ops"
+        client = binary / "hearth"
+        daemon_bin = binary / "hearthd"
+        helper_bin = binary / "hearth-host"
+        ops = binary / "hearth-ops"
         controller = root / "controller"
         helper_state = root / "helper"
         world = root / "world.json"

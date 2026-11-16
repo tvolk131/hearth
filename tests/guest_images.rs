@@ -1,5 +1,5 @@
-use pve_dev::control::JobKind;
-use pve_dev::control::{
+use hearth::control::JobKind;
+use hearth::control::{
     guest::{address, encode_key, image_metadata},
     protocol::Guest,
 };
@@ -7,7 +7,7 @@ use serde_json::json;
 
 #[test]
 fn bootable_creation_durably_freezes_image_and_key_and_charges_the_whole_disk() {
-    use pve_dev::control::{
+    use hearth::control::{
         protocol::{OperationStatus, Request},
         store::{Binding, Store},
     };
@@ -120,7 +120,7 @@ fn bootable_creation_durably_freezes_image_and_key_and_charges_the_whole_disk() 
 
 #[test]
 fn old_blank_vm_wire_encoding_is_unchanged_and_guest_fields_are_strict() {
-    use pve_dev::control::protocol::Request;
+    use hearth::control::protocol::Request;
     let mut value = json!({"action":"create_vm", "request_id":"blank", "name":"blank", "disk_mib":32, "memory_mib":128, "min_memory_mib":128, "cores":1, "owner":null});
     let request: Request = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(request).unwrap(), value);
@@ -175,11 +175,11 @@ fn guest_identity_accepts_only_pinned_hash_and_canonical_public_keys() {
     guest.validate().unwrap();
     let public_key_file = format!("{} owner@example.com\n", guest.ssh_public_key);
     assert_eq!(
-        pve_dev::control::guest::public_key_file(&public_key_file).unwrap(),
+        hearth::control::guest::public_key_file(&public_key_file).unwrap(),
         guest.ssh_public_key
     );
     assert!(
-        pve_dev::control::guest::public_key_file(&format!(
+        hearth::control::guest::public_key_file(&format!(
             "{}\n{}\n",
             guest.ssh_public_key, guest.ssh_public_key
         ))

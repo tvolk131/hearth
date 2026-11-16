@@ -74,13 +74,13 @@ lab adapter is not a solution to that production workspace constraint.
 ## CLI and GUI
 
 ```sh
-pve-devctl --profile lab.json vm shutdown --request-id clean-down --vm-id 9001
+hearth --profile lab.json vm shutdown --request-id clean-down --vm-id 9001
 # Wait for that operation to verify.
-pve-devctl --profile lab.json vm shrink-plan --vm-id 9001 --target-disk-mib 3072
-pve-devctl --profile lab.json vm shrink --request-id shrink-one --vm-id 9001 \
+hearth --profile lab.json vm shrink-plan --vm-id 9001 --target-disk-mib 3072
+hearth --profile lab.json vm shrink --request-id shrink-one --vm-id 9001 \
   --expected-disk-mib 4096 --target-disk-mib 3072 --confirm-downtime
 # Wait, boot the replacement, inspect its data/services, and shut it down cleanly.
-pve-devctl --profile lab.json vm finish-shrink --request-id finish-one --vm-id 9001 \
+hearth --profile lab.json vm finish-shrink --request-id finish-one --vm-id 9001 \
   --preparation-id PREPARATION_OPERATION_ID \
   --confirm-guest-verified --confirm-delete-recovery
 ```

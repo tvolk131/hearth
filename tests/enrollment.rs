@@ -4,8 +4,7 @@ use std::{
     collections::BTreeMap, os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc, time::Duration,
 };
 
-use iroh::SecretKey;
-use pve_dev::control::{
+use hearth::control::{
     host::{
         self, Fault, FaultPoint, Host, HostConfig, HostRequest, MIB, SimulatedVm, SimulatedWorld,
         Step, World,
@@ -15,6 +14,7 @@ use pve_dev::control::{
     store::{Binding, Store, disk_charge},
     vm_change::EnrollmentPlan,
 };
+use iroh::SecretKey;
 use serde_json::{Value, json};
 
 const ENV: &str = "0123456789abcdef0123456789abcded";
@@ -697,7 +697,7 @@ async fn catalog_rejects_unreviewed_unconfirmed_foreign_and_stale_enrollment() {
         );
     }
     let mut stale = plan.clone();
-    stale.observed_at = pve_dev::control::store::now().saturating_sub(301);
+    stale.observed_at = hearth::control::store::now().saturating_sub(301);
     lab.store
         .remember_enrollment_plan(&lab.admin, stale.clone())
         .unwrap();

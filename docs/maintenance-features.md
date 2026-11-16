@@ -16,7 +16,7 @@ Expansion reserves the increased charge before work starts. It records separate 
 
 ## Inspection and recovery
 
-`pve-devctl operations inspect` returns a review token, evidence and the actions currently eligible for full verification. Quick inspection does not claim to verify disk bytes. `operations recover` queues an administrator decision bound to that token. Under the helper lock it checks durable private receipts, current GUIDs, configuration and disk contents before accepting a previously completed resize phase or aborting a preparation that has not swapped/expanded the source.
+`hearth operations inspect` returns a review token, evidence and the actions currently eligible for full verification. Quick inspection does not claim to verify disk bytes. `operations recover` queues an administrator decision bound to that token. Under the helper lock it checks durable private receipts, current GUIDs, configuration and disk contents before accepting a previously completed resize phase or aborting a preparation that has not swapped/expanded the source.
 
 Recovery does not replay an uncertain copy, force-unlock a VM, discard a claim without proof, or reconcile arbitrary operation kinds. Ambiguous or unsupported outcomes remain blocked for investigation. Original operation IDs, cancelled decisions and resource tombstones remain durable.
 

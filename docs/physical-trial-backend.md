@@ -13,9 +13,9 @@ Physical trials initialize catalog and helper schema 4. Older binaries reject th
 The explicit entry points are:
 
 ```sh
-pve-dev-host serve --state-dir /absolute/helper-state \
+hearth-host serve --state-dir /absolute/helper-state \
   --socket /absolute/helper.sock --physical-trial-config /absolute/scope.json
-pve-devd init --data-dir /absolute/controller-state --admin ADMIN_ENDPOINT \
+hearthd init --data-dir /absolute/controller-state --admin ADMIN_ENDPOINT \
   --environment ENVIRONMENT --host-socket /absolute/helper.sock \
   --backend physical_trial --physical-trial-config /absolute/scope.json \
   --disk-capacity-mib CONFIGURED_ROOT_CAP_MIB --network loopback
@@ -29,9 +29,9 @@ Physical-mode iroh is restricted to host loopback. An operator may invoke the po
 
 ## Read-only operator evidence
 
-`pve-devd inspect-offline --data-dir PATH --expected-server ID --expected-environment ENV` opens existing stopped controller state and verifies the public identity pins. It prints the server ID, binding, users, VM state/profiles without guest keys, and public operation records. It neither initializes missing state nor sends network requests, and emits no private keys or frozen job payloads.
+`hearthd inspect-offline --data-dir PATH --expected-server ID --expected-environment ENV` opens existing stopped controller state and verifies the public identity pins. It prints the server ID, binding, users, VM state/profiles without guest keys, and public operation records. It neither initializes missing state nor sends network requests, and emits no private keys or frozen job payloads.
 
-`pve-dev-host provenance --socket PATH` reads the running helper's durable journal. Its `resources` object contains the full binding; dataset and storage identity maps; machine records with their recorded VM/disk identities; and `unsettled_jobs`, a map of every nonverified operation ID to its status. Dataset/storage identities are historical journal proofs, not adoption of current API objects. Machine profiles contain only public guest keys where applicable. No private key material is returned.
+`hearth-host provenance --socket PATH` reads the running helper's durable journal. Its `resources` object contains the full binding; dataset and storage identity maps; machine records with their recorded VM/disk identities; and `unsettled_jobs`, a map of every nonverified operation ID to its status. Dataset/storage identities are historical journal proofs, not adoption of current API objects. Machine profiles contain only public guest keys where applicable. No private key material is returned.
 
 An operator must stop controller admission before checking the offline ledger, require no unsettled helper jobs, stop the helper, and independently compare current resources with the captured provenance before any external cleanup or supervised copy. PVE storage entries have no native GUID; their exact registered configuration plus the pinned parent dataset is the available provenance boundary. These commands do not add a migration/adoption or force-cleanup API.
 

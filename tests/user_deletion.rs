@@ -1,10 +1,10 @@
-use iroh::SecretKey;
-use pve_dev::control::JobKind;
-use pve_dev::control::{
+use hearth::control::JobKind;
+use hearth::control::{
     host::{Fault, FaultPoint, Host, HostConfig, SimulatedWorld, Step, World},
     protocol::*,
     store::{Binding, Store},
 };
+use iroh::SecretKey;
 use serde_json::Value;
 use std::path::PathBuf;
 const ENV: &str = "0123456789abcdef0123456789abcdef";
@@ -97,7 +97,7 @@ async fn embedded_storage_references_block_empty_owner_removal_without_effects()
     lab.edit(|world| {
         world.vms.insert(
             9999,
-            pve_dev::control::host::SimulatedVm {
+            hearth::control::host::SimulatedVm {
                 config: std::collections::BTreeMap::from([(
                     "description".into(),
                     "embedded,storage=ctl-alice:vm-9999-disk-0,other=value".into(),
@@ -137,7 +137,7 @@ async fn pending_effective_storage_reference_blocks_empty_owner_cleanup_without_
     lab.edit(|world| {
         world.vms.insert(
             9999,
-            pve_dev::control::host::SimulatedVm {
+            hearth::control::host::SimulatedVm {
                 config: std::collections::BTreeMap::from([(
                     "description".into(),
                     "unmanaged guest".into(),
@@ -176,7 +176,7 @@ async fn pending_effective_storage_reference_blocks_empty_owner_cleanup_without_
 
 #[tokio::test]
 async fn local_provenance_returns_recorded_identities_and_unsettled_status_without_adoption() {
-    use pve_dev::control::host::HostRequest;
+    use hearth::control::host::HostRequest;
     let (lab, host) = Lab::new().await;
     let recorded = host.journal().unwrap().owners["alice"].identities["dataset"].clone();
     lab.edit(|world| {
@@ -705,7 +705,7 @@ async fn unknown_guest_references_and_recreated_helper_requests_never_destroy_or
     lab.edit(|world| {
         world.vms.insert(
             9999,
-            pve_dev::control::host::SimulatedVm {
+            hearth::control::host::SimulatedVm {
                 config: std::collections::BTreeMap::from([(
                     "scsi0".into(),
                     "ctl-alice:vm-9999-disk-0".into(),
@@ -787,7 +787,7 @@ async fn helper_initial_role_proof_refuses_a_forged_member_payload_for_the_admin
     let (lab, host) = Lab::new().await;
     let mut admin = lab.store.read().unwrap().users["erin"].clone();
     admin.role = Role::Member;
-    host.submit(pve_dev::control::store::Job {
+    host.submit(hearth::control::store::Job {
         operation_id: "forged-admin-deletion".into(),
         kind: JobKind::DeleteUser,
         owner: admin,

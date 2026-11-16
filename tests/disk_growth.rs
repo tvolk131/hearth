@@ -1,9 +1,9 @@
-use iroh::SecretKey;
-use pve_dev::control::{
+use hearth::control::{
     host::{Fault, FaultPoint, Host, HostConfig, MIB, SimulatedWorld, Step, World},
     protocol::*,
     store::{Binding, Store, disk_charge},
 };
+use iroh::SecretKey;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -12,7 +12,7 @@ const ROOT: &str = "labpool/control/alice/vm-9001-disk-0";
 
 #[test]
 fn production_size_limits_accept_750_gib_only_under_explicit_limits() {
-    use pve_dev::control::{shrink::ShrinkSpec, vm_change::GrowthSpec};
+    use hearth::control::{shrink::ShrinkSpec, vm_change::GrowthSpec};
     let size = 750 * 1024;
     let policy = ResourcePolicy {
         budget_mib: size + 4096,

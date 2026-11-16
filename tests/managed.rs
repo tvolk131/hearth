@@ -1,4 +1,4 @@
-use pve_dev::control::{
+use hearth::control::{
     host::{HostBinding, validate as legacy_validate},
     managed::{
         GuestNetwork, ManagedBinding, ManagedConfig, ManagedImage, ManagedScope, UBUNTU_2404_SHA256,
@@ -187,7 +187,7 @@ fn fixture(m: ManagedBinding) -> Fixture {
         binding: b,
     }
 }
-fn call(s: &Store, p: &str, v: Value) -> Result<Value, pve_dev::control::protocol::ApiError> {
+fn call(s: &Store, p: &str, v: Value) -> Result<Value, hearth::control::protocol::ApiError> {
     s.handle(p, serde_json::from_value(v).unwrap())
 }
 
@@ -420,7 +420,7 @@ fn catalog_and_helper_image_allowlist_refuse_unapproved_or_unbootable_profiles()
         let mut wire = serde_json::to_value(job).unwrap();
         wire["kind"] = kind.into();
         assert!(
-            serde_json::from_value::<pve_dev::control::store::Job>(wire).is_err(),
+            serde_json::from_value::<hearth::control::store::Job>(wire).is_err(),
             "{kind}"
         );
     }
@@ -636,7 +636,7 @@ fn missing_managed_fields_preserve_old_serialized_defaults_and_untrusted_config_
 
 #[test]
 fn reviewed_failed_start_cancellation_retains_allocation_and_exact_retry_identity() {
-    use pve_dev::control::vm_change::{JobExtension, RecoveryKind};
+    use hearth::control::vm_change::{JobExtension, RecoveryKind};
     let f = fixture(managed());
     let vm = f
         .store
