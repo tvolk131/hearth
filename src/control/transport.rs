@@ -6,7 +6,7 @@ use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -257,20 +257,31 @@ pub async fn rpc_bound(
         "request exceeds protocol size limit"
     );
     let endpoint = endpoint(key, profile.server.network, 0, false).await?;
+    // Which step a timeout interrupted: no connection points at the network,
+    // a missing reply at the controller.
+    let stage = std::cell::Cell::new("connecting");
     let result = timeout(Duration::from_secs(25), async {
         let connection = endpoint
             .connect(profile.server.endpoint.clone(), ALPN)
             .await?;
+        stage.set("opening a stream");
         let (mut send, mut receive) = connection.open_bi().await?;
+        stage.set("sending the request");
         send.write_all(&request).await?;
         send.finish()?;
+        stage.set("waiting for the reply");
         let bytes = receive.read_to_end(MAX_RESPONSE).await?;
         let response: Response = serde_json::from_slice(&bytes)?;
         connection.close(0u32.into(), b"response received");
         Ok::<_, anyhow::Error>(response)
     })
     .await
-    .context("controller request timed out; retry mutations only with the same request_id");
+    .with_context(|| {
+        format!(
+            "controller request timed out while {}; retry mutations only with the same request_id",
+            stage.get()
+        )
+    });
     endpoint.close().await;
     result?
 }
@@ -396,13 +407,16 @@ async fn admit(
 ) {
     // Handshake failures and stalls come from unauthenticated peers; they are
     // not worth logging.
+    let started = Instant::now();
     let Ok(Ok(connection)) = timeout(HANDSHAKE_TIMEOUT, incoming).await else {
         return;
     };
     drop(handshake);
     let peer = connection.remote_id().to_string();
+    let handshake = started.elapsed();
     if !store.authorized(&peer) {
         reject(&connection, &admission).await;
+        report_slow(&peer, "unenrolled", started, handshake, "done");
         return;
     }
     let Some(_device) = admission.devices.try_acquire(&peer) else {
@@ -416,9 +430,10 @@ async fn admit(
         connection.close(CLOSE_BUSY.into(), b"controller is busy; retry shortly");
         return;
     };
+    let stage = std::sync::Mutex::new("accepting a stream");
     match timeout(
         ENROLLED_TIMEOUT,
-        enrolled(&connection, &peer, store, services),
+        enrolled(&connection, &peer, store, services, &stage),
     )
     .await
     {
@@ -427,7 +442,38 @@ async fn admit(
             connection.close(CLOSE_DONE.into(), b"connection failed");
             eprintln!("control connection failed: {error:#}");
         }
-        Err(_) => connection.close(CLOSE_TIMEOUT.into(), b"request timed out"),
+        Err(_) => {
+            connection.close(CLOSE_TIMEOUT.into(), b"request timed out");
+            let stage = *stage.lock().unwrap_or_else(|e| e.into_inner());
+            eprintln!(
+                "control connection from {} timed out after {}s while {stage} (handshake {} ms)",
+                short(&peer),
+                ENROLLED_TIMEOUT.as_secs(),
+                handshake.as_millis()
+            );
+            return;
+        }
+    }
+    let stage = *stage.lock().unwrap_or_else(|e| e.into_inner());
+    report_slow(&peer, "enrolled", started, handshake, stage);
+}
+
+/// Connections slower than this are logged with their stage timings.
+const SLOW_CONNECTION: Duration = Duration::from_secs(2);
+
+fn short(peer: &str) -> &str {
+    &peer[..peer.len().min(10)]
+}
+
+fn report_slow(peer: &str, kind: &str, started: Instant, handshake: Duration, stage: &str) {
+    let total = started.elapsed();
+    if total >= SLOW_CONNECTION {
+        eprintln!(
+            "slow {kind} control connection from {}: {} ms total, {} ms handshake, last stage {stage}",
+            short(peer),
+            total.as_millis(),
+            handshake.as_millis()
+        );
     }
 }
 
@@ -458,9 +504,13 @@ async fn enrolled(
     peer: &str,
     store: Arc<Store>,
     services: Option<Arc<super::services::Services>>,
+    stage: &std::sync::Mutex<&'static str>,
 ) -> Result<()> {
+    let set = |next: &'static str| *stage.lock().unwrap_or_else(|e| e.into_inner()) = next;
     let (send, mut receive) = connection.accept_bi().await?;
+    set("reading the request");
     let bytes = receive.read_to_end(MAX_REQUEST).await?;
+    set("handling the request");
     let result = match serde_json::from_slice::<WireRequest>(&bytes) {
         Err(_) => Err(failure(
             "invalid",
@@ -480,7 +530,10 @@ async fn enrolled(
             }
         }
     };
-    respond(connection, send, &encode(result)?).await
+    set("sending the reply");
+    respond(connection, send, &encode(result)?).await?;
+    set("done");
+    Ok(())
 }
 
 pub async fn serve(

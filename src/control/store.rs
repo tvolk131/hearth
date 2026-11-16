@@ -933,14 +933,29 @@ impl Store {
         &self,
         action: impl FnOnce(&mut Catalog) -> Result<T, ApiError>,
     ) -> Result<T, ApiError> {
+        let started = std::time::Instant::now();
         let (transaction, mut catalog) =
             super::persist::CatalogWrite::begin(&self.database).map_err(internal)?;
+        let begun = started.elapsed();
         validate_scope(&catalog).map_err(internal)?;
         // Reads run here too, inside the serialized write transaction, so
         // authentication and revocation are checked against current state.
         let result = action(&mut catalog)?;
         validate_scope(&catalog).map_err(internal)?;
+        let applied = started.elapsed();
         transaction.finish(&mut catalog).map_err(internal)?;
+        let total = started.elapsed();
+        // Every change runs synchronously on the caller's thread; a slow one
+        // stalls whatever async task called it.
+        if total >= std::time::Duration::from_secs(1) {
+            eprintln!(
+                "slow catalog write: {} ms total ({} ms to begin and load, {} ms to apply, {} ms to commit)",
+                total.as_millis(),
+                begun.as_millis(),
+                (applied - begun).as_millis(),
+                (total - applied).as_millis()
+            );
+        }
         Ok(result)
     }
 

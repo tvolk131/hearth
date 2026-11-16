@@ -537,7 +537,11 @@ WantedBy=multi-user.target
             summary["seconds"] = round(time.monotonic() - started, 1)
             lab.atomic_json(evidence / "summary.json", summary)
             try:
-                diagnostics = lab.ssh(directory, "pveversion --verbose; zpool status; zfs list -Hp -t all -o name,used,available; journalctl --no-pager -n 160 -u pve-dev-controller -u pve-dev-host", capture_output=True, text=True, timeout=180)
+                if "error" in summary:
+                    # The controller logs a timed-out connection when its own
+                    # 30-second deadline passes, a few seconds after the client's.
+                    time.sleep(8)
+                diagnostics = lab.ssh(directory, "uptime; cat /proc/pressure/cpu /proc/pressure/io /proc/pressure/memory; top -b -n 1 | head -25; pveversion --verbose; zpool status; zfs list -Hp -t all -o name,used,available; journalctl --no-pager -o short-precise -n 400 -u pve-dev-controller -u pve-dev-host", capture_output=True, text=True, timeout=180)
                 (evidence / "diagnostics.log").write_text(diagnostics.stdout + diagnostics.stderr)
                 lab.ssh(directory, "systemctl stop pve-dev-controller.service pve-dev-host.service; for vmid in $(qm list | awk 'NR>1 {print $1}'); do if test \"$vmid\" -ge 9001 && test \"$vmid\" -le 9099; then qm stop \"$vmid\"; fi; done", capture_output=True, text=True, timeout=180)
             except (OSError, subprocess.TimeoutExpired) as error:
