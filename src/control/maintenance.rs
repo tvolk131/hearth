@@ -3,14 +3,14 @@
 use crate::control::JobKind;
 use std::{
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::{BufReader, BufWriter, Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Component, Path},
 };
 
 use anyhow::{Context, Result, ensure};
 use iroh::SecretKey;
-use redb::{Database, Durability, ReadableDatabase, TableDefinition};
+use redb::Database;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -21,8 +21,14 @@ use super::{
     transport::ServerConfig,
 };
 
-use super::{host::JOURNAL, store::CATALOG};
+use super::persist::{self, Layout};
+/// Ceiling for small maintenance inputs: configuration, keys, markers.
 const LIMIT: u64 = 64 * 1024 * 1024;
+/// Ceiling for a backup bundle, which carries all retained history. Bundles
+/// are written and read as streams, so this bounds disk and decoded memory
+/// rather than an intermediate copy. Retention (`pve-dev-ops prune`) keeps
+/// real deployments far below it.
+pub const BUNDLE_LIMIT: u64 = 1024 * 1024 * 1024;
 pub const QUARANTINE: &str = "restore-review-required";
 
 /// Open a live database for export without letting redb's native recovery
@@ -198,29 +204,69 @@ fn write(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Feeds serialized bytes to a digest, or just counts them, without
+/// materializing the encoding.
+struct Sink {
+    digest: Sha256,
+    length: u64,
+}
+
+impl Write for Sink {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.digest.update(bytes);
+        self.length += bytes.len() as u64;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn sink(value: &impl Serialize) -> Result<Sink> {
+    let mut sink = Sink {
+        digest: Sha256::new(),
+        length: 0,
+    };
+    serde_json::to_writer(&mut sink, value)?;
+    Ok(sink)
+}
+
 fn sha(value: &impl Serialize) -> Result<String> {
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
+    Ok(format!("{:x}", sink(value)?.digest.finalize()))
 }
 
-fn read_record<T: serde::de::DeserializeOwned>(
-    db: &Database,
-    table: TableDefinition<u8, &[u8]>,
-) -> Result<T> {
-    let tx = db.begin_read()?;
-    let table = tx.open_table(table)?;
-    let row = table.get(0)?.context("missing durable journal record")?;
+fn write_bundle(path: &Path, bundle: &Bundle) -> Result<()> {
     ensure!(
-        row.value().len() as u64 <= LIMIT,
-        "journal exceeds maintenance size limit"
+        sink(bundle)?.length <= BUNDLE_LIMIT,
+        "bundle exceeds maintenance size limit"
     );
-    Ok(serde_json::from_slice(row.value())?)
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer(&mut writer, bundle)?;
+    let file = writer.into_inner().map_err(|e| e.into_error())?;
+    file.sync_all()?;
+    fs::File::open(path.parent().context("missing parent")?)?.sync_all()?;
+    Ok(())
 }
 
-fn write_record(
-    path: &Path,
-    table: TableDefinition<u8, &[u8]>,
-    value: &impl Serialize,
-) -> Result<()> {
+fn read_bundle(path: &Path) -> Result<Bundle> {
+    regular(path)?;
+    let file = fs::File::open(path)?;
+    ensure!(
+        file.metadata()?.len() <= BUNDLE_LIMIT,
+        "bundle exceeds maintenance size limit"
+    );
+    Ok(serde_json::from_reader(BufReader::new(
+        file.take(BUNDLE_LIMIT + 1),
+    ))?)
+}
+
+/// Creates a new private redb file and initializes it with `init`.
+fn create_database(path: &Path, init: impl FnOnce(&Database) -> Result<()>) -> Result<()> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -228,14 +274,26 @@ fn write_record(
         .mode(0o600)
         .open(path)?;
     let db = Database::builder().create_file(file)?;
-    let mut tx = db.begin_write()?;
-    tx.set_durability(Durability::Immediate)?;
-    tx.open_table(table)?
-        .insert(0, serde_json::to_vec(value)?.as_slice())?;
-    tx.commit()?;
+    init(&db)?;
     drop(db);
     fs::File::open(path)?.sync_all()?;
     Ok(())
+}
+
+/// Reads a stopped controller's full catalog, from either storage format,
+/// refusing a newer format or fields this build would drop.
+fn read_live_catalog(db: &Database) -> Result<Catalog> {
+    if persist::catalog_layout(db)? == Layout::Split {
+        persist::verify_catalog(db)?;
+    }
+    persist::read_catalog(db, true)
+}
+
+fn read_live_journal(db: &Database) -> Result<Journal> {
+    if persist::journal_layout(db)? == Layout::Split {
+        persist::verify_journal(db)?;
+    }
+    persist::read_journal(db)
 }
 
 fn validate(payload: &Payload, pins: &Pins) -> Result<()> {
@@ -293,12 +351,19 @@ fn validate(payload: &Payload, pins: &Pins) -> Result<()> {
         (None, "lab" | "physical_trial" | "managed") => {}
         _ => anyhow::bail!("backup must include exactly the simulated backend's external world"),
     }
-    for (id, operation) in &payload.catalog.operations {
+    validate_pair(&payload.catalog, &payload.journal)
+}
+
+/// Checks that a controller catalog and helper journal describe the same
+/// history: frozen payloads match, terminal proofs agree, and every account
+/// and machine on one side is accounted for on the other.
+pub(crate) fn validate_pair(catalog: &Catalog, journal: &Journal) -> Result<()> {
+    for (id, operation) in &catalog.operations {
         ensure!(
             id == &operation.public.operation_id && id == &operation.job.operation_id,
             "controller operation key mismatch"
         );
-        if let Some(job) = payload.journal.jobs.get(id) {
+        if let Some(job) = journal.jobs.get(id) {
             ensure!(
                 job.job.operation_id == *id
                     && job.fingerprint == host::fingerprint(&job.job)?
@@ -329,18 +394,24 @@ fn validate(payload: &Payload, pins: &Pins) -> Result<()> {
             );
         }
     }
-    for id in payload.journal.jobs.keys() {
+    // Retention prunes the controller side first. A finished helper job whose
+    // controller operation was pruned is still accounted for: the controller
+    // keeps the request-ID tombstone that names it, which a stale controller
+    // (one that never accepted the job) cannot have.
+    let archived: std::collections::BTreeSet<&str> =
+        catalog.requests.values().map(String::as_str).collect();
+    for (id, job) in &journal.jobs {
         ensure!(
-            payload.catalog.operations.contains_key(id),
+            catalog.operations.contains_key(id)
+                || (job.status.is_terminal() && archived.contains(id.as_str())),
             "helper operation missing from controller (stale pair)"
         );
     }
-    for (id, user) in &payload.catalog.users {
+    for (id, user) in &catalog.users {
         if user.state != AccountState::Active {
             ensure!(
                 !user.ready
-                    && payload
-                        .catalog
+                    && catalog
                         .devices
                         .values()
                         .filter(|device| device.user_id == *id)
@@ -349,8 +420,7 @@ fn validate(payload: &Payload, pins: &Pins) -> Result<()> {
             );
         }
         if user.state == AccountState::Deleted {
-            let owner = payload
-                .journal
+            let owner = journal
                 .owners
                 .get(id)
                 .context("deleted controller user has no helper tombstone")?;
@@ -363,7 +433,7 @@ fn validate(payload: &Payload, pins: &Pins) -> Result<()> {
             let operation = owner
                 .delete_operation
                 .as_ref()
-                .and_then(|id| payload.catalog.operations.get(id))
+                .and_then(|id| catalog.operations.get(id))
                 .context("deleted owner lacks its retained controller deletion operation")?;
             ensure!(
                 operation.public.kind == JobKind::DeleteUser
@@ -376,8 +446,7 @@ fn validate(payload: &Payload, pins: &Pins) -> Result<()> {
                 "deleted owner tombstone does not match a verified delete_user operation"
             );
             ensure!(
-                payload
-                    .catalog
+                catalog
                     .devices
                     .values()
                     .filter(|device| device.user_id == *id)
@@ -386,9 +455,8 @@ fn validate(payload: &Payload, pins: &Pins) -> Result<()> {
             );
         }
     }
-    for (id, machine) in &payload.journal.machines {
-        let vm = payload
-            .catalog
+    for (id, machine) in &journal.machines {
+        let vm = catalog
             .vms
             .get(id)
             .context("helper machine missing from controller")?;
@@ -401,8 +469,7 @@ fn validate(payload: &Payload, pins: &Pins) -> Result<()> {
         observed.as_object_mut().unwrap().remove("owner");
         observed.as_object_mut().unwrap().remove("state");
         let expected = serde_json::to_value(&machine.profile)?;
-        let resize_profile = payload
-            .catalog
+        let resize_profile = catalog
             .operations
             .values()
             .filter(|r| {
@@ -426,11 +493,11 @@ fn validate(payload: &Payload, pins: &Pins) -> Result<()> {
                 }
                 target.is_some() && target_profile == expected
             });
-        let incoming_profile=payload.catalog.migrations.values().filter(|r|r.role==super::migration::Role::Destination && r.plan.target_vm_id==*id && r.plan.target_owner==vm.owner && (!r.phase.terminal() || r.phase==super::migration::Phase::Aborted && vm.state==VmState::Deleted && machine.state==MachineState::Deleted)).any(|r| {
+        let incoming_profile=catalog.migrations.values().filter(|r|r.role==super::migration::Role::Destination && r.plan.target_vm_id==*id && r.plan.target_owner==vm.owner && (!r.phase.terminal() || r.phase==super::migration::Phase::Aborted && vm.state==VmState::Deleted && machine.state==MachineState::Deleted)).any(|r| {
             let mut staging=observed.clone();
             staging.as_object_mut().unwrap().remove("guest");
             let approved=r.plan.vm(super::migration::Role::Destination);
-            approved.guest==vm.guest && staging==expected && payload.journal.jobs.values().any(|job|matches!(job.job.extension.as_deref(),Some(super::vm_change::JobExtension::IncomingMigration(plan)) if plan==&r.plan))
+            approved.guest==vm.guest && staging==expected && journal.jobs.values().any(|job|matches!(job.job.extension.as_deref(),Some(super::vm_change::JobExtension::IncomingMigration(plan)) if plan==&r.plan))
         });
         ensure!(
             observed == expected || resize_profile || incoming_profile,
@@ -499,8 +566,8 @@ pub fn backup(
         created_at: super::store::now(),
         config: serde_json::from_slice(&read(&controller.join("config.json"))?)?,
         identity: read(&controller.join("identity.key"))?,
-        catalog: read_record(&controller_lock, CATALOG)?,
-        journal: read_record(&helper_lock, JOURNAL)?,
+        catalog: read_live_catalog(&controller_lock)?,
+        journal: read_live_journal(&helper_lock)?,
         simulated_world: simulated_world
             .map(|path| -> Result<World> { Ok(serde_json::from_slice(&read(path)?)?) })
             .transpose()?,
@@ -511,19 +578,18 @@ pub fn backup(
         payload_sha256: sha(&payload)?,
         payload,
     };
-    let bytes = serde_json::to_vec(&bundle)?;
     ensure!(
-        bytes.len() as u64 <= LIMIT,
+        sink(&bundle)?.length <= BUNDLE_LIMIT,
         "bundle exceeds maintenance size limit"
     );
     new_directory(output)?;
-    write(&output.join("bundle.json"), &bytes)?;
+    write_bundle(&output.join("bundle.json"), &bundle)?;
     Ok(receipt(&bundle, pins, false))
 }
 
 fn load(input: &Path, pins: &Pins, expected_bundle: &str) -> Result<Bundle> {
     directory(input)?;
-    let bundle: Bundle = serde_json::from_slice(&read(&input.join("bundle.json"))?)?;
+    let bundle = read_bundle(&input.join("bundle.json"))?;
     ensure!(
         bundle.schema == 1
             && bundle.payload_sha256 == expected_bundle
@@ -650,7 +716,7 @@ pub fn prepare_adoption(
     validate(&bundle.payload, pins)?;
     bundle.payload_sha256 = sha(&bundle.payload)?;
     new_directory(output)?;
-    write(&output.join("bundle.json"), &serde_json::to_vec(&bundle)?)?;
+    write_bundle(&output.join("bundle.json"), &bundle)?;
     // Keep prepared state quarantined until the deployment operator independently
     // reconciles every root-approved live resource and both old-state digests.
     let receipt = restore(
@@ -865,7 +931,7 @@ pub fn prepare_offline_adopted_shrink(
     validate(&bundle.payload, pins)?;
     bundle.payload_sha256 = sha(&bundle.payload)?;
     new_directory(output)?;
-    write(&output.join("bundle.json"), &serde_json::to_vec(&bundle)?)?;
+    write_bundle(&output.join("bundle.json"), &bundle)?;
     write(
         &output.join("managed-prepared.json"),
         &serde_json::to_vec_pretty(&config)?,
@@ -959,7 +1025,7 @@ pub fn prepare_compute_expansion(
     validate(&bundle.payload, pins)?;
     bundle.payload_sha256 = sha(&bundle.payload)?;
     new_directory(output)?;
-    write(&output.join("bundle.json"), &serde_json::to_vec(&bundle)?)?;
+    write_bundle(&output.join("bundle.json"), &bundle)?;
     write(
         &output.join("managed-prepared.json"),
         &serde_json::to_vec_pretty(&config)?,
@@ -993,16 +1059,12 @@ pub fn restore(input: &Path, output: &Path, pins: &Pins, expected_bundle: &str) 
         &controller.join("config.json"),
         &serde_json::to_vec_pretty(&bundle.payload.config)?,
     )?;
-    write_record(
-        &controller.join("state.redb"),
-        CATALOG,
-        &bundle.payload.catalog,
-    )?;
-    write_record(
-        &helper.join("host-journal.redb"),
-        JOURNAL,
-        &bundle.payload.journal,
-    )?;
+    create_database(&controller.join("state.redb"), |db| {
+        persist::write_new_catalog(db, &bundle.payload.catalog)
+    })?;
+    create_database(&helper.join("host-journal.redb"), |db| {
+        persist::write_journal(db, &bundle.payload.journal)
+    })?;
     if let Some(world) = &bundle.payload.simulated_world {
         write(
             &output.join("simulated-world.json"),
@@ -1020,6 +1082,196 @@ pub fn restore(input: &Path, output: &Path, pins: &Pins, expected_bundle: &str) 
     )?;
     fs::File::open(output)?.sync_all()?;
     Ok(receipt(&bundle, pins, true))
+}
+
+/// Result of [`prune`]: what was (or, for a dry run, would be) removed.
+#[derive(Debug, Serialize)]
+pub struct PruneReceipt {
+    pub schema: u32,
+    pub environment: String,
+    pub dry_run: bool,
+    pub cutoff: u64,
+    pub archive: Option<std::path::PathBuf>,
+    pub archive_sha256: Option<String>,
+    pub pruned_operations: usize,
+    pub pruned_audit_entries: usize,
+    pub pruned_helper_jobs: usize,
+    pub retained_operations: usize,
+    pub retained_helper_jobs: usize,
+    pub retained_request_ids: usize,
+    pub activates_workers: bool,
+}
+
+/// Points at which [`prune_with`] hands control to its test hook.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PruneStage {
+    ArchiveWritten,
+    ControllerPruned,
+}
+
+/// Offline: exports finished history older than `older_than_days` to a new
+/// JSONL `archive`, then prunes it from the stopped controller and helper.
+/// With `archive` absent nothing is written (a dry run). See
+/// [`super::retention`] for what is kept and why.
+pub fn prune(
+    controller: &Path,
+    helper: &Path,
+    archive: Option<&Path>,
+    older_than_days: u64,
+    pins: &Pins,
+) -> Result<PruneReceipt> {
+    prune_with(
+        controller,
+        helper,
+        archive,
+        older_than_days,
+        super::store::now(),
+        pins,
+        |_| Ok(()),
+    )
+}
+
+/// [`prune`] at an explicit time, with a hook that runs after the archive is
+/// durable and after the controller commit. Tests use it to interrupt a run.
+#[doc(hidden)]
+pub fn prune_with(
+    controller: &Path,
+    helper: &Path,
+    archive: Option<&Path>,
+    older_than_days: u64,
+    now: u64,
+    pins: &Pins,
+    mut hook: impl FnMut(PruneStage) -> Result<()>,
+) -> Result<PruneReceipt> {
+    ensure!(
+        (1..=36500).contains(&older_than_days),
+        "retention must be between 1 and 36500 days"
+    );
+    directory(controller)?;
+    directory(helper)?;
+    ensure_not_quarantined(controller)?;
+    ensure_not_quarantined(helper)?;
+    let controller_db = controller.join("state.redb");
+    let helper_db = helper.join("host-journal.redb");
+    regular(&controller_db)?;
+    regular(&helper_db)?;
+    let controller_lock = open_unrepaired(&controller_db).context("controller must be stopped")?;
+    let helper_lock = open_unrepaired(&helper_db).context("helper must be stopped")?;
+    ensure!(
+        read(&controller.join("initialized"))? == b"controller-v1\n",
+        "controller initialization incomplete"
+    );
+    ensure!(
+        read(&helper.join("initialized"))? == format!("{}\n", pins.environment).as_bytes(),
+        "helper initialization incomplete"
+    );
+    ensure!(
+        persist::catalog_layout(&controller_lock)? == Layout::Split
+            && persist::journal_layout(&helper_lock)? == Layout::Split,
+        "state is still in storage format 1; start the upgraded controller and helper once so \
+         they migrate it, then prune"
+    );
+    persist::verify_catalog(&controller_lock)?;
+    persist::verify_journal(&helper_lock)?;
+    let config: ServerConfig = serde_json::from_slice(&read(&controller.join("config.json"))?)?;
+    let identity: [u8; 32] = read(&controller.join("identity.key"))?
+        .as_slice()
+        .try_into()
+        .context("invalid server identity length")?;
+    let catalog = persist::read_catalog(&controller_lock, false)?;
+    let audit = persist::read_audit(&controller_lock)?;
+    let journal = persist::read_journal(&helper_lock)?;
+    ensure!(
+        SecretKey::from_bytes(&identity).public().to_string() == pins.server_id,
+        "server identity mismatch"
+    );
+    ensure!(
+        config.binding == catalog.binding
+            && catalog.binding.environment == pins.environment
+            && journal.binding.environment == pins.environment
+            && journal.binding.pool_guid == pins.pool_guid
+            && catalog.binding.attested_by(&journal.binding),
+        "controller/helper/expected environment, scope or pool mismatch"
+    );
+    super::store::validate_scope(&catalog)?;
+    host::validate_scope(&journal)?;
+    validate_pair(&catalog, &journal)?;
+
+    let cutoff = now.saturating_sub(older_than_days * 86_400);
+    let plan = super::retention::plan(&catalog, &audit, &journal, cutoff)?;
+    let mut receipt = PruneReceipt {
+        schema: 1,
+        environment: pins.environment.clone(),
+        dry_run: archive.is_none(),
+        cutoff,
+        archive: None,
+        archive_sha256: None,
+        pruned_operations: plan.operations.len(),
+        pruned_audit_entries: plan.audit.len(),
+        pruned_helper_jobs: plan.helper_jobs.len(),
+        retained_operations: catalog.operations.len() - plan.operations.len(),
+        retained_helper_jobs: journal.jobs.len() - plan.helper_jobs.len(),
+        retained_request_ids: catalog.requests.len(),
+        activates_workers: false,
+    };
+    let Some(archive) = archive else {
+        return Ok(receipt);
+    };
+    if plan.is_empty() {
+        return Ok(receipt);
+    }
+
+    // Export first: nothing is removed until the archive is durable.
+    let parent = archive
+        .parent()
+        .context("archive has no parent directory")?;
+    trusted_output_parent(parent)?;
+    ensure!(
+        archive.file_name().is_some()
+            && archive
+                .components()
+                .all(|c| matches!(c, Component::RootDir | Component::Normal(_))),
+        "unsafe archive path"
+    );
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(archive)
+        .context("archive must not already exist")?;
+    let header = super::retention::ArchiveHeader {
+        format: super::retention::ARCHIVE_FORMAT,
+        environment: pins.environment.clone(),
+        created_at: now,
+        cutoff,
+        controller_revision: catalog.revision,
+        helper_sequence: journal.sequence,
+    };
+    let mut writer = BufWriter::new(file);
+    let sha256 =
+        super::retention::write_archive(&mut writer, &header, &catalog, &audit, &journal, &plan)?;
+    let file = writer.into_inner().map_err(|e| e.into_error())?;
+    file.sync_all()?;
+    fs::File::open(parent)?.sync_all()?;
+    receipt.archive = Some(archive.to_path_buf());
+    receipt.archive_sha256 = Some(sha256);
+    hook(PruneStage::ArchiveWritten)?;
+
+    // Controller first: once it can no longer submit an operation, its
+    // finished helper job is safe to drop, and the pair stays valid between
+    // the two commits.
+    persist::prune_catalog(&controller_lock, &plan.operations, &plan.audit, |after| {
+        super::store::validate_scope(after)?;
+        validate_pair(after, &journal)
+    })?;
+    hook(PruneStage::ControllerPruned)?;
+    let catalog = persist::read_catalog(&controller_lock, false)?;
+    persist::prune_journal(&helper_lock, &plan.helper_jobs, |after| {
+        host::validate_scope(after)?;
+        validate_pair(&catalog, after)
+    })?;
+    Ok(receipt)
 }
 
 #[cfg(test)]
@@ -1546,7 +1798,10 @@ mod managed_backup_tests {
             disk_shrinks: BTreeMap::new(),
             migrations: BTreeMap::new(),
         };
-        write_record(&helper.join("host-journal.redb"), JOURNAL, &journal).unwrap();
+        create_database(&helper.join("host-journal.redb"), |db| {
+            persist::write_journal(db, &journal)
+        })
+        .unwrap();
         write(
             &helper.join("initialized"),
             format!("{}\n", managed.environment).as_bytes(),

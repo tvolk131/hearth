@@ -61,7 +61,8 @@ pub const MIB: u64 = 1024 * 1024;
 
 const JOURNAL_FILE: &str = "host-journal.redb";
 const SENTINEL_FILE: &str = "initialized";
-pub(crate) const JOURNAL: TableDefinition<u8, &[u8]> = TableDefinition::new("host_journal_v1");
+/// The retired format-1 journal table; see [`super::persist`].
+pub(crate) const JOURNAL: TableDefinition<u8, &[u8]> = super::persist::LEGACY_JOURNAL;
 /// Proxmox-side limit for a graceful guest shutdown task.
 const GUEST_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(600);
 /// Extra time the foreground `pvesh` gets beyond the guest limit, so the task
@@ -3137,6 +3138,10 @@ impl Host {
                     "helper journal is bound to a different pool GUID; refusing"
                 );
             }
+            // Migrate a format-1 journal only once it has validated as is, so
+            // the cold schema repair tool still applies to one that does not.
+            super::persist::migrate_journal(&database)?;
+            super::persist::verify_journal(&database)?;
             let host = Self {
                 state_dir: config.state_dir.clone(),
                 database,
@@ -3259,25 +3264,13 @@ impl Host {
     }
 
     fn change<T>(&self, action: impl FnOnce(&mut Journal) -> Result<T>) -> Result<T> {
-        let mut transaction = self.database.begin_write()?;
-        transaction.set_durability(Durability::Immediate)?;
-        let result;
-        {
-            let mut table = transaction.open_table(JOURNAL)?;
-            let mut journal: Journal = {
-                let bytes = table
-                    .get(0)?
-                    .ok_or_else(|| anyhow!("helper journal missing"))?;
-                serde_json::from_slice(bytes.value())?
-            };
-            result = action(&mut journal)?;
-            // `journal()` refuses an out-of-scope journal, so committing one
-            // would wedge every later read. Refuse the write instead.
-            validate_scope(&journal).context("refusing to commit an invalid helper journal")?;
-            let bytes = serde_json::to_vec(&journal)?;
-            table.insert(0, bytes.as_slice())?;
-        }
-        transaction.commit()?;
+        // One durable write transaction; only changed rows are rewritten.
+        let (transaction, mut journal) = super::persist::JournalWrite::begin(&self.database)?;
+        let result = action(&mut journal)?;
+        // `journal()` refuses an out-of-scope journal, so committing one
+        // would wedge every later read. Refuse the write instead.
+        validate_scope(&journal).context("refusing to commit an invalid helper journal")?;
+        transaction.finish(&mut journal)?;
         Ok(result)
     }
 
@@ -6105,24 +6098,11 @@ fn remember(journal: &mut Journal, context: &Context, step: Step, identity: &Val
 }
 
 fn read_journal(database: &Database) -> Result<Journal> {
-    let transaction = database.begin_read()?;
-    let table = transaction.open_table(JOURNAL)?;
-    let bytes = table
-        .get(0)?
-        .ok_or_else(|| anyhow!("helper journal missing; refusing initialization"))?;
-    Ok(serde_json::from_slice(bytes.value())?)
+    super::persist::read_journal(database)
 }
 
 fn write_journal(database: &Database, journal: &Journal) -> Result<()> {
-    let mut transaction = database.begin_write()?;
-    transaction.set_durability(Durability::Immediate)?;
-    {
-        let mut table = transaction.open_table(JOURNAL)?;
-        let bytes = serde_json::to_vec(journal)?;
-        table.insert(0, bytes.as_slice())?;
-    }
-    transaction.commit()?;
-    Ok(())
+    super::persist::write_journal(database, journal)
 }
 
 fn envelope(result: Result<HostResponse>) -> Envelope {

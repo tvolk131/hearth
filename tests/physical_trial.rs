@@ -714,7 +714,7 @@ fn physical_schema_downgrade_fence_survives_policy_and_deletion_transitions() {
     {
         let mut table = tx
             .open_table(redb::TableDefinition::<u8, &[u8]>::new(
-                "controller_catalog_v1",
+                "controller_core_v2",
             ))
             .unwrap();
         let mut catalog: Value =
@@ -823,7 +823,7 @@ async fn offline_physical_binding_restore_preserves_scope_and_stays_quarantined(
         host::BackendConfig,
         maintenance::{self, Pins},
     };
-    use redb::{Database, Durability, TableDefinition};
+    use redb::Database;
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().canonicalize().unwrap();
     use std::os::unix::fs::PermissionsExt;
@@ -860,13 +860,7 @@ async fn offline_physical_binding_restore_preserves_scope_and_stays_quarantined(
         managed: None,
     };
     let database = Database::open(helper.join("host-journal.redb")).unwrap();
-    let mut tx = database.begin_write().unwrap();
-    tx.set_durability(Durability::Immediate).unwrap();
-    tx.open_table(TableDefinition::<u8, &[u8]>::new("host_journal_v1"))
-        .unwrap()
-        .insert(0, serde_json::to_vec(&journal).unwrap().as_slice())
-        .unwrap();
-    tx.commit().unwrap();
+    pve_dev::control::persist::write_journal(&database, &journal).unwrap();
     drop(database);
     let (_, store, key) = transport::open(&controller).unwrap();
     drop(store);

@@ -99,7 +99,10 @@ fn read_only_requests_do_not_rewrite_the_catalog() {
             Request::Whoami {},
             Request::Budget {},
             Request::ListVms {},
-            Request::ListOperations {},
+            Request::ListOperations {
+                cursor: None,
+                limit: None,
+            },
         ] {
             store.handle(peer, request).unwrap();
         }

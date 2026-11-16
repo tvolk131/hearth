@@ -258,7 +258,23 @@ pub enum Request {
     ListImages {},
     ListImageCatalog {},
     ListVms {},
-    ListOperations {},
+    /// Without `cursor` or `limit` this returns every visible operation as a
+    /// bare array, as it always has. With either it returns one
+    /// [`OperationPage`] in operation-ID order, continuing after `cursor`.
+    ListOperations {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    /// Administrator-only. One [`AuditPage`] of retained audit entries in
+    /// sequence order, continuing after `cursor`.
+    ListAudit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
     GetOperation {
         operation_id: String,
     },
@@ -380,6 +396,34 @@ pub struct Dashboard {
     pub imported_vms: Vec<ImportedVm>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub storage_allocations: Vec<super::adoption::StorageAllocation>,
+    /// Visible terminal operations left out of `operations` to bound the
+    /// response; page through them with `ListOperations`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_operations: u64,
+}
+
+/// One page of [`Request::ListOperations`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct OperationPage {
+    pub operations: Vec<Operation>,
+    /// Pass back as `cursor` to continue; absent on the last page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AuditEntry {
+    pub seq: u64,
+    pub entry: serde_json::Value,
+}
+
+/// One page of [`Request::ListAudit`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AuditPage {
+    pub entries: Vec<AuditEntry>,
+    /// Pass back as `cursor` to continue; absent on the last page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

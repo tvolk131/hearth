@@ -6,16 +6,13 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::Database;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::protocol::*;
 use super::shrink::{PendingShrink, ShrinkPlan, ShrinkSpec};
-
-pub(crate) const CATALOG: TableDefinition<u8, &[u8]> =
-    TableDefinition::new("controller_catalog_v1");
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Binding {
@@ -263,6 +260,90 @@ pub struct Catalog {
 
 pub struct Store {
     database: Database,
+}
+
+/// Encoded size budget for one page of a list response, well under
+/// `MAX_RESPONSE` so that a page always fits in one reply.
+pub const PAGE_BYTES: usize = 1024 * 1024;
+/// Page size when a paged request names no limit.
+pub const DEFAULT_PAGE: usize = 100;
+/// Largest page a client may ask for.
+pub const MAX_PAGE: usize = 1000;
+/// Most terminal operations a dashboard includes, newest first. Every
+/// non-terminal operation is always included; older history is paged with
+/// `ListOperations`.
+pub const DASHBOARD_TERMINAL_OPERATIONS: usize = 200;
+
+fn page_limit(limit: Option<u32>) -> Result<usize, ApiError> {
+    match limit {
+        None => Ok(DEFAULT_PAGE),
+        Some(limit) if (1..=MAX_PAGE as u32).contains(&limit) => Ok(limit as usize),
+        Some(_) => Err(failure("invalid", "page limit must be between 1 and 1000")),
+    }
+}
+
+fn encoded_len(value: &impl Serialize) -> usize {
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
+}
+
+/// Operations in ID order after `cursor`, bounded by `limit` and [`PAGE_BYTES`].
+fn operation_page<'a>(items: impl Iterator<Item = &'a Operation>, limit: usize) -> OperationPage {
+    let mut operations: Vec<Operation> = Vec::new();
+    let mut size = 0;
+    for operation in items {
+        let length = encoded_len(operation);
+        if operations.len() == limit || (!operations.is_empty() && size + length > PAGE_BYTES) {
+            return OperationPage {
+                next_cursor: operations.last().map(|o| o.operation_id.clone()),
+                operations,
+            };
+        }
+        size += length + 1;
+        operations.push(operation.clone());
+    }
+    OperationPage {
+        operations,
+        next_cursor: None,
+    }
+}
+
+/// Every visible non-terminal operation plus the most recent terminal ones,
+/// in operation-ID order, and how many terminal operations were left out.
+fn dashboard_operations(catalog: &Catalog, actor: &User) -> (Vec<Operation>, u64) {
+    let visible_records = catalog
+        .operations
+        .values()
+        .filter(|record| visible(actor, &record.public.owner));
+    let (mut terminal, mut kept): (Vec<_>, Vec<_>) =
+        visible_records.partition(|record| record.public.status.is_terminal());
+    terminal.sort_by(|a, b| {
+        let at = |r: &Record| {
+            r.public.progress.as_ref().map_or(r.public.created_at, |p| {
+                p.updated_at.max(r.public.created_at)
+            })
+        };
+        at(b)
+            .cmp(&at(a))
+            .then_with(|| b.public.operation_id.cmp(&a.public.operation_id))
+    });
+    let mut size = 0;
+    let mut included = 0;
+    for record in &terminal {
+        let length = encoded_len(&record.public);
+        if included == DASHBOARD_TERMINAL_OPERATIONS || (included > 0 && size + length > PAGE_BYTES)
+        {
+            break;
+        }
+        size += length + 1;
+        included += 1;
+    }
+    let omitted = (terminal.len() - included) as u64;
+    kept.extend(terminal.into_iter().take(included));
+    kept.sort_by(|a, b| a.public.operation_id.cmp(&b.public.operation_id));
+    (
+        kept.into_iter().map(|r| r.public.clone()).collect(),
+        omitted,
+    )
 }
 
 pub fn failure(code: &str, message: &str) -> ApiError {
@@ -581,7 +662,17 @@ fn retry(
         .requests
         .get(&format!("{}/{request_id}", actor.user_id))
     {
-        let record = &catalog.operations[operation_id];
+        // Request IDs outlive the operations they created: retention prunes
+        // old terminal operations but keeps this mapping, so a reused ID can
+        // never mint the same operation ID again (the helper deduplicates by
+        // operation ID). Without the record the payload cannot be compared,
+        // so any reuse is refused.
+        let Some(record) = catalog.operations.get(operation_id) else {
+            return Err(failure(
+                "conflict",
+                "request_id belongs to an operation that has been archived; use a new request_id",
+            ));
+        };
         if record.fingerprint != fingerprint {
             return Err(failure(
                 "conflict",
@@ -792,11 +883,14 @@ impl Store {
         let store = Self {
             database: Database::create(path)?,
         };
-        store.write_catalog(&catalog)?;
+        super::persist::write_new_catalog(&store.database, &catalog)?;
         std::fs::File::open(path.parent().context("database has no parent")?)?.sync_all()?;
         Ok(store)
     }
 
+    /// Opens an existing catalog. A format-1 (single-row) database is
+    /// validated as it is, then migrated in one atomic transaction; a database
+    /// from a newer format, or with fields this build would drop, is refused.
     pub fn open(path: &Path, binding: &Binding) -> Result<Self> {
         binding.validate()?;
         let store = Self {
@@ -808,71 +902,47 @@ impl Store {
             matches!(catalog.schema, 1..=7) && &catalog.binding == binding,
             "database environment identity or policy changed; investigate rather than reset"
         );
+        super::persist::migrate_catalog(&store.database)?;
+        super::persist::verify_catalog(&store.database)?;
         Ok(store)
     }
 
-    fn write_catalog(&self, catalog: &Catalog) -> Result<()> {
-        let mut transaction = self.database.begin_write()?;
-        transaction.set_durability(Durability::Immediate)?;
-        {
-            let mut table = transaction.open_table(CATALOG)?;
-            let bytes = serde_json::to_vec(catalog)?;
-            table.insert(0, bytes.as_slice())?;
-        }
-        transaction.commit()?;
-        Ok(())
-    }
-
+    /// The catalog without its append-only audit log; see [`Self::audit_page`].
     pub fn read(&self) -> Result<Catalog> {
-        let transaction = self.database.begin_read()?;
-        let table = transaction.open_table(CATALOG)?;
-        let bytes = table
-            .get(0)?
-            .context("controller catalog missing; refusing initialization")?;
-        Ok(serde_json::from_slice(bytes.value())?)
+        super::persist::read_catalog(&self.database, false)
     }
 
+    /// The catalog including every retained audit entry.
+    pub fn read_with_audit(&self) -> Result<Catalog> {
+        super::persist::read_catalog(&self.database, true)
+    }
+
+    /// Retained audit entries in sequence order, after the `after` cursor.
+    pub fn audit_page(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<super::persist::AuditRows> {
+        super::persist::audit_page(&self.database, after, limit, PAGE_BYTES)
+    }
+
+    /// Runs `action` against the current catalog inside one serialized,
+    /// durable write transaction. Only rows that changed are rewritten, and
+    /// nothing is committed (or the revision bumped) when nothing changed.
+    /// `catalog.audit` starts empty here: entries pushed onto it are appended
+    /// to the retained audit log.
     pub fn change<T>(
         &self,
         action: impl FnOnce(&mut Catalog) -> Result<T, ApiError>,
     ) -> Result<T, ApiError> {
-        let mut transaction = self.database.begin_write().map_err(internal)?;
-        transaction
-            .set_durability(Durability::Immediate)
-            .map_err(internal)?;
-        let result;
-        let changed;
-        {
-            let mut table = transaction.open_table(CATALOG).map_err(internal)?;
-            let (mut catalog, stored): (Catalog, Vec<u8>) = {
-                let bytes = table
-                    .get(0)
-                    .map_err(internal)?
-                    .ok_or_else(|| failure("internal", "catalog missing"))?;
-                let stored = bytes.value().to_vec();
-                (serde_json::from_slice(&stored).map_err(internal)?, stored)
-            };
-            validate_scope(&catalog).map_err(internal)?;
-            result = action(&mut catalog)?;
-            validate_scope(&catalog).map_err(internal)?;
-            // Reads run here too, inside the serialized write transaction, so
-            // authentication and revocation are checked against current
-            // state. Only commit (and fsync) when something actually changed.
-            changed = serde_json::to_vec(&catalog).map_err(internal)? != stored;
-            if changed {
-                catalog.revision = catalog
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| failure("internal", "catalog revision exhausted"))?;
-                let bytes = serde_json::to_vec(&catalog).map_err(internal)?;
-                table.insert(0, bytes.as_slice()).map_err(internal)?;
-            }
-        }
-        if changed {
-            transaction.commit().map_err(internal)?;
-        } else {
-            transaction.abort().map_err(internal)?;
-        }
+        let (transaction, mut catalog) =
+            super::persist::CatalogWrite::begin(&self.database).map_err(internal)?;
+        validate_scope(&catalog).map_err(internal)?;
+        // Reads run here too, inside the serialized write transaction, so
+        // authentication and revocation are checked against current state.
+        let result = action(&mut catalog)?;
+        validate_scope(&catalog).map_err(internal)?;
+        transaction.finish(&mut catalog).map_err(internal)?;
         Ok(result)
     }
 
@@ -1005,10 +1075,26 @@ impl Store {
     }
 
     pub fn handle(&self, peer: &str, request: Request) -> Result<Value, ApiError> {
+        if let Request::ListAudit { cursor, limit } = request {
+            // The audit log is append-only and is not loaded into the catalog,
+            // so it is read from its own table rather than inside `change`.
+            let actor = self.actor(peer)?;
+            admin(&actor)?;
+            let (entries, next_cursor) = self
+                .audit_page(cursor, page_limit(limit)?)
+                .map_err(internal)?;
+            return Ok(json!(AuditPage {
+                entries: entries
+                    .into_iter()
+                    .map(|(seq, entry)| AuditEntry { seq, entry })
+                    .collect(),
+                next_cursor,
+            }));
+        }
         let fingerprint = digest(&request);
         self.change(|catalog| {
             let actor = authenticate(catalog, peer)?;
-            if catalog.binding.managed.as_ref().is_some_and(|m| m.admin_only_mutations) && !matches!(request, Request::Dashboard {} | Request::Whoami {} | Request::Budget {} | Request::ListImages {} | Request::ListImageCatalog {} | Request::ListVms {} | Request::ListOperations {} | Request::GetOperation { .. }) { admin(&actor)?; }
+            if catalog.binding.managed.as_ref().is_some_and(|m| m.admin_only_mutations) && !matches!(request, Request::Dashboard {} | Request::Whoami {} | Request::Budget {} | Request::ListImages {} | Request::ListImageCatalog {} | Request::ListVms {} | Request::ListOperations { .. } | Request::GetOperation { .. }) { admin(&actor)?; }
             match request {
                 Request::HostInventory {} => Err(failure("unavailable", "host inventory requires a live bound helper")),
                 Request::EnrollVm {request_id,plan_id,vm_id,owner,confirm_enrollment} => {
@@ -1090,22 +1176,28 @@ impl Store {
                 Request::ListImages {} => Ok(json!(catalog.binding.guest_images)),
                 Request::ListImageCatalog {} => Ok(json!(catalog.binding.managed.as_ref().map_or_else(Vec::new, |m| m.images.iter().map(|i|i.catalog()).collect::<Vec<_>>()))),
                 Request::ListVms {} => Ok(json!(catalog.vms.values().filter(|vm| visible(&actor, &vm.owner)).collect::<Vec<_>>())),
-                Request::ListOperations {} => Ok(json!(catalog.operations.values().filter(|record| visible(&actor, &record.public.owner)).map(|record| &record.public).collect::<Vec<_>>())),
+                Request::ListOperations { cursor: None, limit: None } => Ok(json!(catalog.operations.values().filter(|record| visible(&actor, &record.public.owner)).map(|record| &record.public).collect::<Vec<_>>())),
+                Request::ListOperations { cursor, limit } => {
+                    let limit = page_limit(limit)?;
+                    let start = cursor.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+                    Ok(json!(operation_page(catalog.operations.range::<String, _>((start, std::ops::Bound::Unbounded)).map(|(_, record)| record).filter(|record| visible(&actor, &record.public.owner)).map(|record| &record.public), limit)))
+                }
+                Request::ListAudit { .. } => Err(failure("internal", "audit listing is served outside the catalog transaction")),
                 Request::GetOperation { operation_id } => {
                     let record = catalog.operations.get(&operation_id).filter(|record| visible(&actor, &record.public.owner))
                         .ok_or_else(|| failure("forbidden", "operation not found or forbidden"))?;
                     Ok(json!(record.public))
                 }
-                Request::Dashboard {} => Ok(json!(Dashboard {
+                Request::Dashboard {} => { let (operations, omitted_operations) = dashboard_operations(catalog, &actor); Ok(json!(Dashboard {
                     storage_allocations: super::adoption::allocations(catalog).into_iter().filter(|a| visible(&actor, &a.owner)).collect(),
                     identity: actor.clone(), users: catalog.users.values().filter(|user| visible(&actor, &user.user_id)).cloned().collect(),
                     budget: budget(catalog, &actor), vms: catalog.vms.values().filter(|vm| visible(&actor, &vm.owner)).cloned().collect(),
-                    operations: catalog.operations.values().filter(|record| visible(&actor, &record.public.owner)).map(|record| record.public.clone()).collect(),
+                    operations, omitted_operations,
                     environment: catalog.binding.environment.clone(), backend: catalog.binding.backend.clone(),
                     disk_shrinks: catalog.disk_shrinks.values().filter(|s| visible(&actor, &s.owner)).cloned().collect(),
                     capabilities: self.capabilities_for(&catalog.binding),
                     imported_vms: if actor.role == Role::Admin { catalog.imported_vms.iter().filter(|r| catalog.binding.managed.as_ref().is_none_or(|m| m.adopted(r.vm.vm_id).is_none())).cloned().collect() } else { Vec::new() },
-                })),
+                })) }
                 Request::EnrollDevice { user_id, endpoint_id, label } => {
                     admin(&actor)?;
                     let endpoint_id = endpoint_id.parse::<iroh::EndpointId>().map_err(|_| failure("invalid", "invalid device endpoint identity"))?.to_string();

@@ -218,3 +218,42 @@ fn offline_quarantine_preparation_is_a_pve_dev_ops_subcommand() {
         assert!(output.stdout.is_empty());
     }
 }
+
+#[test]
+fn prune_requires_an_archive_or_an_explicit_dry_run() {
+    let help = ops(&["prune", "--help"]);
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+    for flag in [
+        "--archive",
+        "--dry-run",
+        "--older-than-days",
+        "[default: 180]",
+    ] {
+        assert!(text.contains(flag), "{flag} missing from {text}");
+    }
+    let pins = [
+        "--controller-dir",
+        "/missing/controller",
+        "--helper-dir",
+        "/missing/helper",
+        "--expected-environment",
+        "0123456789abcdef0123456789abcdef",
+        "--expected-server",
+        "server",
+        "--expected-pool-guid",
+        "1",
+    ];
+    for extra in [
+        vec![],
+        vec!["--dry-run", "--archive", "/tmp/archive.jsonl"],
+        vec!["--dry-run", "--older-than-days", "0"],
+    ] {
+        let mut args = vec!["prune"];
+        args.extend(pins);
+        args.extend(extra.iter().copied());
+        let output = ops(&args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty());
+    }
+}

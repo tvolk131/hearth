@@ -597,7 +597,7 @@ async fn legacy_pending_helper_plan_and_original_owner_policy_survive_upgrade() 
         let tx = db.begin_write().unwrap();
         {
             let mut table = tx
-                .open_table(TableDefinition::<u8, &[u8]>::new("host_journal_v1"))
+                .open_table(TableDefinition::<u8, &[u8]>::new("host_journal_core_v2"))
                 .unwrap();
             let bytes = table.get(0).unwrap().unwrap().value().to_vec();
             let mut journal: Value = serde_json::from_slice(&bytes).unwrap();
