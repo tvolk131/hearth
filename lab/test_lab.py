@@ -2,7 +2,9 @@ import hashlib
 import contextlib
 import io
 import json
+import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -95,6 +97,7 @@ class LabSafetyTests(unittest.TestCase):
             directory = pathlib.Path(temporary)
             (directory / "host.pub").write_text("ssh-ed25519 disposable-test-key")
             with mock.patch.object(lab, "space"), mock.patch.object(lab, "identity", return_value=directory), \
+                    mock.patch.dict(os.environ, {"PVE_LAB_ACCEL": "tcg"}), \
                     mock.patch.object(lab.socket, "socket") as sockets, \
                     mock.patch.object(lab.subprocess, "Popen") as popen, \
                     mock.patch.object(lab, "qmp") as monitor:
@@ -117,6 +120,7 @@ class LabSafetyTests(unittest.TestCase):
             directory = pathlib.Path(temporary)
             (directory / "host.pub").write_text("ssh-ed25519 disposable-test-key")
             with mock.patch.object(lab, "space"), mock.patch.object(lab, "identity", return_value=directory), \
+                    mock.patch.dict(os.environ, {"PVE_LAB_ACCEL": "tcg"}), \
                     mock.patch.object(lab.socket, "socket") as sockets, \
                     mock.patch.object(lab.subprocess, "Popen") as popen, \
                     mock.patch.object(lab, "qmp"):
@@ -130,6 +134,155 @@ class LabSafetyTests(unittest.TestCase):
                     self.assertNotIn("hostfwd=udp:0.0.0.0", network)
                     self.assertIn("tcg,thread=multi", command)
                     self.assertFalse(any("/dev/disk" in argument for argument in command))
+
+    def test_boot_uses_kvm_with_host_cpu_and_records_it(self):
+        emulation = {"accelerator": "kvm", "cpu": "host", "threading": None, "reason": "/dev/kvm is usable"}
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = pathlib.Path(temporary)
+            (directory / "host.pub").write_text("ssh-ed25519 disposable-test-key")
+            with mock.patch.object(lab, "space"), mock.patch.object(lab, "identity", return_value=directory), \
+                    mock.patch.object(lab, "choose_emulation", return_value=emulation), \
+                    mock.patch.object(lab.socket, "socket") as sockets, \
+                    mock.patch.object(lab.subprocess, "Popen") as popen, \
+                    mock.patch.object(lab, "qmp"), contextlib.redirect_stdout(io.StringIO()):
+                sockets.return_value.__enter__.return_value.getsockname.return_value = ("127.0.0.1", 23456)
+                popen.return_value.poll.return_value = None
+                with lab.boot(directory, "a" * 32):
+                    command = popen.call_args.args[0]
+                    self.assertEqual(command[command.index("-accel") + 1], "kvm")
+                    self.assertEqual(command[command.index("-cpu") + 1], "host")
+                    self.assertFalse(any("tcg" in argument for argument in command))
+                    self.assertEqual(json.loads((directory / "emulation.json").read_text()), emulation)
+
+
+class AcceleratorTests(unittest.TestCase):
+    def choose(self, wanted, usable, threading="single"):
+        environment = {} if wanted is None else {"PVE_LAB_ACCEL": wanted}
+        with mock.patch.dict(os.environ, environment), mock.patch.object(lab, "kvm_usable", return_value=usable) as probe:
+            if wanted is None:
+                os.environ.pop("PVE_LAB_ACCEL", None)
+            return lab.choose_emulation(threading), probe
+
+    def test_auto_prefers_usable_kvm_with_host_cpu(self):
+        emulation, _ = self.choose(None, (True, "/dev/kvm is usable"))
+        self.assertEqual(emulation, {"accelerator": "kvm", "cpu": "host", "threading": None, "reason": "/dev/kvm is usable"})
+
+    def test_auto_falls_back_to_tcg_with_its_reason(self):
+        emulation, _ = self.choose("auto", (False, "/dev/kvm does not exist"), "multi")
+        self.assertEqual(emulation, {"accelerator": "tcg", "cpu": "max", "threading": "multi", "reason": "/dev/kvm does not exist"})
+
+    def test_tcg_can_be_forced_without_probing_kvm(self):
+        emulation, probe = self.choose("tcg", (True, "/dev/kvm is usable"))
+        self.assertEqual((emulation["accelerator"], emulation["cpu"]), ("tcg", "max"))
+        self.assertIn("forced", emulation["reason"])
+        probe.assert_not_called()
+
+    def test_required_kvm_never_falls_back(self):
+        with self.assertRaisesRegex(RuntimeError, "PVE_LAB_ACCEL=kvm but /dev/kvm is not usable"):
+            self.choose("kvm", (False, "/dev/kvm is not usable: Permission denied"))
+
+    def test_unknown_accelerator_is_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "must be one of"):
+            self.choose("hvf", (True, "/dev/kvm is usable"))
+
+    def test_missing_device_is_not_usable(self):
+        with mock.patch.object(lab.os, "open", side_effect=FileNotFoundError):
+            self.assertEqual(lab.kvm_usable(), (False, "/dev/kvm does not exist"))
+
+    def test_inaccessible_device_is_not_usable(self):
+        with mock.patch.object(lab.os, "open", side_effect=PermissionError(13, "Permission denied")):
+            self.assertEqual(lab.kvm_usable(), (False, "/dev/kvm is not usable: Permission denied"))
+
+
+class SealTests(unittest.TestCase):
+    def test_seed_carries_the_run_identity_for_the_sealed_boot_hook(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = pathlib.Path(temporary)
+            for name, text in (("host", "PRIVATE"), ("host.pub", "ssh-ed25519 host"), ("controller.pub", "ssh-ed25519 controller")):
+                (directory / name).write_text(text)
+            with mock.patch.object(lab, "identity", return_value=directory), mock.patch.object(lab, "run") as execute:
+                lab.seed(directory, "b" * 32)
+            command = execute.call_args.args[0]
+            self.assertIn("-graft-points", command)
+            self.assertIn(f"lab-host-key={directory / 'host'}", command)
+            self.assertIn(f"lab-host-key.pub={directory / 'host.pub'}", command)
+            self.assertIn(f"lab-authorized-keys={directory / 'controller.pub'}", command)
+            self.assertEqual(json.loads((directory / "meta-data").read_text())["instance-id"], "b" * 32)
+
+    def test_seal_script_is_valid_bash_and_removes_keys(self):
+        script = lab.ROOT / "lab/seal.sh"
+        subprocess.run(["bash", "-n", str(script)], check=True)
+        text = script.read_text()
+        for required in ("shred --zero --remove", "/etc/ssh/ssh_host_*_key", "/var/lib/cloud/instances/*/user-data.txt*",
+                         "touch /etc/cloud/cloud-init.disabled", "systemctl enable pve-lab-ssh-identity.service"):
+            self.assertIn(required, text)
+
+    def stamp(self, home, **changes):
+        base = home / "base"
+        base.mkdir()
+        inputs = hashlib.sha256((lab.ROOT / "lab/inputs.json").read_bytes() + (lab.ROOT / "lab/bootstrap.sh").read_bytes()).hexdigest()
+        info = {"schema": 1, "inputs_digest": inputs, "seal_sha256": lab.seal_digest(), "nonce": "c" * 32}
+        info.update(changes)
+        for key, value in changes.items():
+            if value is None:
+                del info[key]
+        (base / "build.json").write_text(json.dumps(info))
+
+    def test_changed_seal_script_refuses_the_existing_base(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            self.stamp(home, seal_sha256="0" * 64)
+            with mock.patch.object(lab, "HOME", home), mock.patch.object(lab, "download") as fetch:
+                with self.assertRaisesRegex(RuntimeError, "seal script changed"):
+                    lab.build(60)
+                fetch.assert_not_called()
+
+    def test_existing_base_reuse_restores_a_missing_backing_image(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            self.stamp(home)
+            with mock.patch.object(lab, "HOME", home), mock.patch.object(lab, "download") as fetch, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                lab.build(60)
+            fetch.assert_called_once_with()
+
+    def test_unsealed_legacy_base_is_reused_with_a_warning(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            self.stamp(home, seal_sha256=None)
+            output = io.StringIO()
+            with mock.patch.object(lab, "HOME", home), mock.patch.object(lab, "download"), contextlib.redirect_stdout(output):
+                lab.build(60)
+            self.assertIn("never share or cache it", output.getvalue())
+
+    def test_fresh_build_seals_before_shutdown_and_records_accelerator(self):
+        emulation = {"accelerator": "kvm", "cpu": "host", "threading": None, "reason": "/dev/kvm is usable"}
+        calls = []
+
+        @contextlib.contextmanager
+        def booted(directory, nonce, emulation=None):
+            calls.append(("boot", emulation))
+            process = mock.Mock(returncode=None)
+            yield process
+            calls.append("shutdown")
+            process.returncode = 0
+
+        def remote(directory, command, **options):
+            calls.append(command)
+            return mock.Mock(returncode=0, stdout="pve-manager/9\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = pathlib.Path(temporary)
+            with mock.patch.object(lab, "HOME", home), mock.patch.object(lab, "download", return_value=home / "debian.qcow2"), \
+                    mock.patch.object(lab, "run"), mock.patch.object(lab, "seed"), \
+                    mock.patch.object(lab, "choose_emulation", return_value=emulation), \
+                    mock.patch.object(lab, "boot", booted), mock.patch.object(lab, "ready", return_value={"version": "9"}), \
+                    mock.patch.object(lab, "ssh", side_effect=remote), contextlib.redirect_stdout(io.StringIO()):
+                lab.build(60)
+            info = json.loads((home / "base/build.json").read_text())
+        self.assertEqual(calls, [("boot", emulation), "pveversion --verbose; dpkg-query -W", "bash -s", "shutdown"])
+        self.assertEqual(info["emulation"], emulation)
+        self.assertEqual(info["seal_sha256"], lab.seal_digest())
 
 if __name__ == "__main__":
     unittest.main()

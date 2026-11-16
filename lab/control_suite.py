@@ -245,7 +245,8 @@ def run(lab, timeout, linux_bin_dir, bootable=False, shrink=False, shrink_prepar
     base = lab.HOME / "base"
     base_info = json.loads((base / "build.json").read_text())
     lab.run(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", str(base / "root.qcow2"), str(directory / "root.qcow2")])
-    shutil.copyfile(base / "seed.iso", directory / "seed.iso")
+    # Fresh seed from this machine's identity: a cached base carries no SSH keys.
+    lab.seed(directory, base_info["nonce"])
     for letter in ("a", "b"):
         lab.run(["qemu-img", "create", "-f", "qcow2", str(directory / f"data-{letter}.qcow2"), "20G" if shrink else ("8G" if bootable else "4G")])
     identities = {}
@@ -256,7 +257,7 @@ def run(lab, timeout, linux_bin_dir, bootable=False, shrink=False, shrink_prepar
     summary = {"schema": 1, "backend": "real-proxmox-iroh-controller", "environment": nonce,
                "production_contacted": False, "disk_shrink_qualification": shrink, "nested_guest_boot_verified": False, "complete": False, "checks": []}
     if shrink_prepare_only:summary["qualification_scope"]="preparation_only_without_guest_boot_or_recovery_deletion"
-    summary["emulation"] = {"accelerator": "tcg", "threading": "multi", "outer_vcpus": 4}
+    summary["emulation"] = {**lab.choose_emulation("multi"), "outer_vcpus": 4}
     summary["artifacts_sha256"] = {}
     for binary in binaries.iterdir():
         with binary.open("rb") as source:
@@ -312,7 +313,7 @@ def run(lab, timeout, linux_bin_dir, bootable=False, shrink=False, shrink_prepar
         return invoke(name, {"action": "create_vm", "request_id": request_id, "name": vm_name,
                              "disk_mib": 32, "memory_mib": 128, "min_memory_mib": 128, "cores": 1, "owner": None})
 
-    with lab.boot(directory, nonce, data_disks=True, control_port=True) as process:
+    with lab.boot(directory, nonce, data_disks=True, control_port=True, emulation=summary["emulation"]) as process:
         try:
             summary["proxmox"] = lab.ready(directory, process, timeout)
             lab.disable_host_cloud_init(directory)

@@ -48,25 +48,76 @@ jobs:
         run: python3 scripts/test-control-local.py --quota --user-deletion --swift
 
   real-proxmox:
-    # Boots a disposable Proxmox VE under software emulation (~1-2h), so it runs
-    # nightly and on demand rather than on every push.
+    # Boots a disposable Proxmox VE under KVM on the runner. A cold base-image
+    # build plus the controller/guest suite takes ~30-45 min; with a cached
+    # base it is the suite alone. Still too slow for every push, so it runs
+    # nightly and on demand.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 90
     env:
       PVE_LAB_MIN_FREE_GIB: '3'
+      # Fail fast if /dev/kvm is unusable instead of silently falling back to
+      # software emulation, which cannot finish within these timeouts.
+      PVE_LAB_ACCEL: kvm
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           persist-credentials: false
       - uses: DeterminateSystems/nix-installer-action@9383ce2bf08796b65508822f5982f49151badc4e
+      - name: Let the runner user open /dev/kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
       - name: Available runner resources
         run: df -h .; free -h
+      - name: Base image cache key
+        id: base-key
+        # Every input that determines the sealed base: the pinned Debian image
+        # and Proxmox key (inputs.json), the in-guest bootstrap and seal
+        # scripts, the seed/boot/build code, and the pinned QEMU/xorriso
+        # toolchain. Apt repositories are rolling, so the ISO week bounds how
+        # stale the cached Proxmox packages can get.
+        run: echo "key=proxmox-base-v1-${{ runner.os }}-$(date -u +%G-W%V)-${{ hashFiles('lab/inputs.json', 'lab/bootstrap.sh', 'lab/seal.sh', 'lab/lab.py', 'nix/flake.nix', 'nix/flake.lock') }}" >> "$GITHUB_OUTPUT"
+      - name: Restore sealed base image
+        id: base-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.base-key.outputs.key }}
+          # Only the sealed disk, its stamp/package list and the pinned Debian
+          # image it is backed by (by absolute path, which is stable on hosted
+          # runners). Never the seed ISO or user-data (private host key),
+          # .lab/identity, logs or run overlays.
+          path: |
+            .lab/debian.qcow2
+            .lab/base/root.qcow2
+            .lab/base/build.json
+            .lab/base/packages.txt
+      - name: Build and seal the base image
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 45
+        run: nix develop ./nix --command python3 lab/lab.py build --timeout 1800
+      - name: Refuse to cache a base that still holds lab SSH keys
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        run: python3 -c 'import json, sys; sys.exit("base is not sealed" if "seal_sha256" not in json.load(open(".lab/base/build.json")) else 0)'
+      - name: Save sealed base image
+        if: steps.base-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: ${{ steps.base-key.outputs.key }}
+          path: |
+            .lab/debian.qcow2
+            .lab/base/root.qcow2
+            .lab/base/build.json
+            .lab/base/packages.txt
       - name: Install portable Linux Rust target on the disposable runner
         run: rustup toolchain install 1.99.1 --profile minimal --target x86_64-unknown-linux-musl
       - name: Build static Linux controller and helper
         run: nix develop ./nix --command bash scripts/build-lab-binaries.sh
       - name: Authenticated controller and bootable guests against real Proxmox
+        timeout-minutes: 50
         run: nix develop ./nix --command python3 lab/lab.py guest-test --linux-bin-dir target/x86_64-unknown-linux-musl/release --timeout 1800
       - name: Save diagnostics, never virtual disks or private lab keys
         if: always()

@@ -113,7 +113,7 @@ def run(linux_bin_dir, timeout):
                "empty_user_deletion_verified": False, "readonly_mount_probe_verified": False,
                "external_fixture_preserved": False, "global_configuration_preserved": False,
                "unmanaged_vm_preserved": False, "unmanaged_dataset_preserved": False}
-    summary["emulation"] = {"accelerator": "tcg", "threading": "multi", "outer_vcpus": 4, "outer_memory_mib": 4096}
+    summary["emulation"] = {**lab.choose_emulation("multi"), "outer_vcpus": 4, "outer_memory_mib": 4096}
     summary["harness_sha256"] = {name: hashlib.sha256((lab.ROOT / "lab" / name).read_bytes()).hexdigest()
         for name in ("physical_trial_suite.py", "control_suite.py", "lab.py", "setup.py")}
     started = time.monotonic()
@@ -193,7 +193,7 @@ print(json.dumps({"dataset":dataset,"zfs":zfs,"configs":configs,"storage":storag
     failure = None
     process = None
     try:
-        with lab.boot(directory, nonce, data_disks=True, control_port=True) as process:
+        with lab.boot(directory, nonce, data_disks=True, control_port=True, emulation=summary["emulation"]) as process:
             try:
                 summary["proxmox"] = lab.ready(directory, process, timeout)
                 lab.disable_host_cloud_init(directory)
