@@ -40,49 +40,24 @@ guards prevent this:
 
 * **Format version.** A database whose `format` is higher than this build
   understands is refused with "written in storage format N by a newer
-  Hearth". So are unknown formats, a split layout without its marker, a
-  database holding both layouts, and tables this build did not create.
+  Hearth". So are unknown formats, a split layout without its marker, and
+  tables this build did not create.
 * **Lossless open.** On open, every stored row is decoded and re-encoded. If
   any stored non-null field does not survive, the database is refused and the
   error names that field. This catches a newer build that added a field
   without bumping the format.
 
-Binaries from before this change only know `controller_catalog_v1` and
-`host_journal_v1`. Migration deletes those tables, so an old binary fails to
-find its catalog instead of starting with partial state.
+### Format 1 (retired)
 
-### Migration from format 1
-
-`Store::open` and `Host::open` first validate the legacy row: scope, binding
-and helper identity checks. Then they migrate once, in a single redb write
-transaction. The transaction writes the split tables and the format marker,
-deletes the legacy table, runs the same lossless and audit-counter checks that
-every later open runs, and only then commits. A format-1 database holding any
-table besides its legacy one is refused before anything is written. redb
-commits are atomic, so a crash or a refused check leaves either the untouched
-format-1 database or a complete, verified format-2 one, and the next open
-simply retries.
-
-There is no automatic way back: once migrated, the previously deployed binary
-cannot open either database, and it refuses bundles written by this build
-after a prune. Before upgrading a host, take a `hearth-ops backup` with the
-binary that is **currently deployed**, and keep it. Rolling back means
-restoring that bundle with the old binary; anything accepted after the upgrade
-is lost. Tests cover:
-
-* migration from a committed format-1 fixture
-  (`tests/fixtures/format1-controller-catalog.json`) and from a format-1
-  helper journal;
-* a hook that fails, a hook that panics, and a child process that exits
-  without unwinding just before the commit. Each leaves the format-1 database
-  intact, and a later open migrates it.
-
-Format-1 rows were only ever written by this build or older ones, and before
-this change unknown fields were dropped on every write anyway. So migration
-decodes the legacy row the same way the old code did; the lossless check
-applies from format 2 on. The managed schema-repair tool (`schema_repair.rs`)
-still works only on format-1 journals, because the downgrade it repairs can
-only have been written by an older binary.
+Format 1 stored each database as one JSON row in `controller_catalog_v1` or
+`host_journal_v1`. Hearth builds from #19 up to `e619ef0` migrated it in place
+on first open, in a single verified redb transaction, and both managed hosts
+have since been migrated. This build no longer carries that code, nor the
+cold schema-repair tool that worked only on format-1 journals. It refuses a
+format-1 database without writing to it, and the error names `e619ef0` as the
+last build that migrates it. Format-2 databases cannot be opened by format-1
+binaries either, so roll back by restoring a backup with the binary that took
+it.
 
 ### Backups
 
@@ -90,8 +65,9 @@ Backup bundles keep their logical, layout-independent JSON payload. `backup`
 reads both databases through the same validated path as the services.
 `restore` writes a fresh format-2 database. Bundles are now written and
 hashed as a stream, and the read cap has risen from 64 MiB to 1 GiB
-(`maintenance::BUNDLE_LIMIT`). Bundles from before this change still verify
-and restore.
+(`maintenance::BUNDLE_LIMIT`). Because the payload does not depend on the
+storage layout, bundles taken before the format change still verify and
+restore.
 
 ## Paging
 

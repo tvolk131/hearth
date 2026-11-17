@@ -18,11 +18,9 @@
 //! and re-encode without losing a field, so a newer build that forgot to bump
 //! the format is still refused instead of truncated.
 //!
-//! Migration from format 1 is one-way and runs in a single redb write
-//! transaction: the split tables, the format marker and the removal of the
-//! legacy table commit together or not at all, so a crash at any point leaves
-//! either the untouched legacy database or the complete new one. A format-1
-//! binary cannot open a migrated database because its legacy table is gone.
+//! Hearth builds up to the release that dropped migration converted format 1
+//! in place on first open. This build refuses a format-1 database and says
+//! which earlier build to open it with first.
 //!
 //! Format 2 does not change what the in-memory [`Catalog`] or [`Journal`]
 //! contains, with one exception: controller audit entries are append-only and
@@ -51,31 +49,21 @@ const AUDIT_NEXT_KEY: &str = "audit_next";
 /// Storage format this build reads and writes, for both databases.
 pub const FORMAT_VERSION: u64 = 2;
 
-pub const LEGACY_CATALOG: TableDefinition<u8, &[u8]> =
-    TableDefinition::new("controller_catalog_v1");
 pub const CATALOG_CORE: TableDefinition<u8, &[u8]> = TableDefinition::new("controller_core_v2");
 pub const OPERATIONS: TableDefinition<&str, &[u8]> =
     TableDefinition::new("controller_operations_v2");
 pub const REQUESTS: TableDefinition<&str, &str> = TableDefinition::new("controller_requests_v2");
 pub const AUDIT: TableDefinition<u64, &[u8]> = TableDefinition::new("controller_audit_v2");
 
-pub const LEGACY_JOURNAL: TableDefinition<u8, &[u8]> = TableDefinition::new("host_journal_v1");
 pub const JOURNAL_CORE: TableDefinition<u8, &[u8]> = TableDefinition::new("host_journal_core_v2");
 pub const JOBS: TableDefinition<&str, &[u8]> = TableDefinition::new("host_jobs_v2");
 
 const CATALOG_SPLIT: [&str; 3] = ["operations", "requests", "audit"];
 const JOURNAL_SPLIT: [&str; 1] = ["jobs"];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Layout {
-    /// Format 1: one JSON row in the legacy table.
-    Legacy,
-    /// Format 2: core blob plus per-row tables.
-    Split,
-}
-
 struct Kind {
     what: &'static str,
+    /// The single table of retired format 1, named only to refuse it clearly.
     legacy: &'static str,
     owned: &'static [&'static str],
 }
@@ -98,7 +86,10 @@ const HELPER: Kind = Kind {
     owned: &["hearth_meta", "host_journal_core_v2", "host_jobs_v2"],
 };
 
-fn classify(kind: &Kind, names: &[String], format: Option<u64>) -> Result<Layout> {
+/// The last Hearth build that migrates a format-1 database on first open.
+const LAST_MIGRATING_BUILD: &str = "e619ef0";
+
+fn classify(kind: &Kind, names: &[String], format: Option<u64>) -> Result<()> {
     let has = |name: &str| names.iter().any(|n| n == name);
     if has(META.name()) {
         let version =
@@ -114,11 +105,6 @@ fn classify(kind: &Kind, names: &[String], format: Option<u64>) -> Result<Layout
             "{} has unsupported storage format {version}",
             kind.what
         );
-        ensure!(
-            !has(kind.legacy),
-            "{} contains both the legacy and the current layout; investigate rather than guess",
-            kind.what
-        );
         for name in names {
             ensure!(
                 kind.owned.contains(&name.as_str()),
@@ -127,32 +113,23 @@ fn classify(kind: &Kind, names: &[String], format: Option<u64>) -> Result<Layout
                 kind.what
             );
         }
-        return Ok(Layout::Split);
+        return Ok(());
     }
+    ensure!(
+        !has(kind.legacy),
+        "{} is still in retired storage format 1; open it once with Hearth \
+         {LAST_MIGRATING_BUILD}, the last build that migrates it, then use this build",
+        kind.what
+    );
     ensure!(
         !kind.owned.iter().any(|name| has(name)),
         "{} has current-layout tables without a format marker; refusing to guess",
         kind.what
     );
-    ensure!(
-        has(kind.legacy),
-        "{} missing; refusing initialization",
-        kind.what
-    );
-    // No Hearth build wrote any other table beside the legacy one. Refuse
-    // here, before migrating, because the current-format rules below would
-    // refuse the migrated database and the legacy table would already be gone.
-    for name in names {
-        ensure!(
-            name == kind.legacy,
-            "{} contains table {name}, which no Hearth build wrote; investigate before migrating",
-            kind.what
-        );
-    }
-    Ok(Layout::Legacy)
+    bail!("{} missing; refusing initialization", kind.what)
 }
 
-fn read_layout(tx: &ReadTransaction, kind: &Kind) -> Result<Layout> {
+fn check_layout(tx: &ReadTransaction, kind: &Kind) -> Result<()> {
     let names: Vec<String> = tx.list_tables()?.map(|t| t.name().to_owned()).collect();
     let format = if names.iter().any(|n| n == META.name()) {
         tx.open_table(META)?.get(FORMAT_KEY)?.map(|v| v.value())
@@ -160,26 +137,6 @@ fn read_layout(tx: &ReadTransaction, kind: &Kind) -> Result<Layout> {
         None
     };
     classify(kind, &names, format)
-}
-
-fn write_layout(tx: &WriteTransaction, kind: &Kind) -> Result<Layout> {
-    let names: Vec<String> = tx.list_tables()?.map(|t| t.name().to_owned()).collect();
-    let format = if names.iter().any(|n| n == META.name()) {
-        tx.open_table(META)?.get(FORMAT_KEY)?.map(|v| v.value())
-    } else {
-        None
-    };
-    classify(kind, &names, format)
-}
-
-/// Layout of an existing controller database, refusing unknown formats.
-pub fn catalog_layout(db: &Database) -> Result<Layout> {
-    read_layout(&db.begin_read()?, &CONTROLLER)
-}
-
-/// Layout of an existing helper database, refusing unknown formats.
-pub fn journal_layout(db: &Database) -> Result<Layout> {
-    read_layout(&db.begin_read()?, &HELPER)
 }
 
 // ---------------------------------------------------------------------------
@@ -477,36 +434,19 @@ fn load_split_catalog(tx: &ReadTransaction, audit: bool, check: bool) -> Result<
     Ok(catalog)
 }
 
-/// Reads the catalog from either layout without writing. With `audit` false
-/// the append-only audit log is left empty.
+/// Reads the catalog without writing. With `audit` false the append-only
+/// audit log is left empty.
 pub fn read_catalog(db: &Database, audit: bool) -> Result<Catalog> {
     let tx = db.begin_read()?;
-    match read_layout(&tx, &CONTROLLER)? {
-        Layout::Legacy => {
-            let table = tx.open_table(LEGACY_CATALOG)?;
-            let mut catalog: Catalog = serde_json::from_slice(
-                table
-                    .get(0)?
-                    .context("controller catalog missing; refusing initialization")?
-                    .value(),
-            )?;
-            if !audit {
-                catalog.audit.clear();
-            }
-            Ok(catalog)
-        }
-        Layout::Split => load_split_catalog(&tx, audit, false),
-    }
+    check_layout(&tx, &CONTROLLER)?;
+    load_split_catalog(&tx, audit, false)
 }
 
-/// Decodes every row of a current-format catalog and refuses any field that
-/// this build would drop on rewrite.
+/// Decodes every row of the catalog and refuses any field that this build
+/// would drop on rewrite.
 pub fn verify_catalog(db: &Database) -> Result<()> {
     let tx = db.begin_read()?;
-    ensure!(
-        read_layout(&tx, &CONTROLLER)? == Layout::Split,
-        "controller catalog has not been migrated"
-    );
+    check_layout(&tx, &CONTROLLER)?;
     load_split_catalog(&tx, false, true)?;
     let next = tx.open_table(META)?.get(AUDIT_NEXT_KEY)?.map(|v| v.value());
     let last = tx.open_table(AUDIT)?.last()?.map(|(k, _)| k.value());
@@ -520,10 +460,8 @@ pub fn verify_catalog(db: &Database) -> Result<()> {
 /// Audit entries with their durable sequence numbers.
 pub fn read_audit(db: &Database) -> Result<Vec<(u64, Value)>> {
     let tx = db.begin_read()?;
-    match read_layout(&tx, &CONTROLLER)? {
-        Layout::Legacy => Ok((0u64..).zip(read_catalog(db, true)?.audit).collect()),
-        Layout::Split => load_audit(&tx.open_table(AUDIT)?),
-    }
+    check_layout(&tx, &CONTROLLER)?;
+    load_audit(&tx.open_table(AUDIT)?)
 }
 
 /// A page of `(seq, entry)` audit rows and the cursor for the next page.
@@ -560,63 +498,6 @@ pub fn audit_page(
         page.push((key.value(), serde_json::from_slice(bytes)?));
     }
     Ok((page, None))
-}
-
-/// Migrates a format-1 controller database in place. Returns whether it did.
-pub fn migrate_catalog(db: &Database) -> Result<bool> {
-    migrate_catalog_with(db, || Ok(()))
-}
-
-/// [`migrate_catalog`] with a hook that runs after every write but before the
-/// commit. Tests use it to fail or panic at the last possible moment.
-#[doc(hidden)]
-pub fn migrate_catalog_with(
-    db: &Database,
-    before_commit: impl FnOnce() -> Result<()>,
-) -> Result<bool> {
-    let mut tx = db.begin_write()?;
-    tx.set_durability(Durability::Immediate)?;
-    if write_layout(&tx, &CONTROLLER)? == Layout::Split {
-        tx.abort()?;
-        return Ok(false);
-    }
-    let catalog: Catalog = {
-        let table = tx.open_table(LEGACY_CATALOG)?;
-        let row = table
-            .get(0)?
-            .context("controller catalog missing; refusing initialization")?;
-        serde_json::from_slice(row.value()).context("decoding legacy controller catalog")?
-    };
-    write_split_catalog(&tx, catalog)?;
-    ensure!(
-        tx.delete_table(LEGACY_CATALOG)?,
-        "legacy controller catalog vanished during migration"
-    );
-    // The same checks that run on every open, run before the commit: a
-    // refusal now leaves the legacy database untouched.
-    check_written_catalog(&tx).context("migrated controller catalog failed verification")?;
-    before_commit()?;
-    tx.commit()?;
-    Ok(true)
-}
-
-/// [`verify_catalog`] against an uncommitted migration.
-fn check_written_catalog(tx: &WriteTransaction) -> Result<()> {
-    ensure!(
-        write_layout(tx, &CONTROLLER)? == Layout::Split,
-        "controller catalog migration left an unrecognized layout"
-    );
-    let core = load_core(&tx.open_table(CATALOG_CORE)?, "controller catalog")?;
-    decode_catalog_core(&core, true)?;
-    decode_operations(&load_rows(&tx.open_table(OPERATIONS)?)?, true)?;
-    load_requests(&tx.open_table(REQUESTS)?)?;
-    let next = tx.open_table(META)?.get(AUDIT_NEXT_KEY)?.map(|v| v.value());
-    let last = tx.open_table(AUDIT)?.last()?.map(|(k, _)| k.value());
-    ensure!(
-        next.is_some_and(|next| last.is_none_or(|last| last < next)),
-        "controller audit sequence counter is missing or behind its log"
-    );
-    Ok(())
 }
 
 /// An open write transaction on a current-format catalog, holding the stored
@@ -811,35 +692,24 @@ fn load_split_journal(tx: &ReadTransaction, check: bool) -> Result<Journal> {
     Ok(journal)
 }
 
-/// Reads the whole journal from either layout without writing.
+/// Reads the whole journal without writing.
 pub fn read_journal(db: &Database) -> Result<Journal> {
     let tx = db.begin_read()?;
-    match read_layout(&tx, &HELPER)? {
-        Layout::Legacy => {
-            let table = tx.open_table(LEGACY_JOURNAL)?;
-            let row = table
-                .get(0)?
-                .context("helper journal missing; refusing initialization")?;
-            Ok(serde_json::from_slice(row.value())?)
-        }
-        Layout::Split => load_split_journal(&tx, false),
-    }
+    check_layout(&tx, &HELPER)?;
+    load_split_journal(&tx, false)
 }
 
-/// Decodes every row of a current-format journal and refuses any field that
-/// this build would drop on rewrite.
+/// Decodes every row of the journal and refuses any field that this build
+/// would drop on rewrite.
 pub fn verify_journal(db: &Database) -> Result<()> {
     let tx = db.begin_read()?;
-    ensure!(
-        read_layout(&tx, &HELPER)? == Layout::Split,
-        "helper journal has not been migrated"
-    );
+    check_layout(&tx, &HELPER)?;
     load_split_journal(&tx, true)?;
     Ok(())
 }
 
-/// Replaces the whole journal with `journal` in the current format, whatever
-/// layout the database had. Used to initialize and by offline tooling.
+/// Replaces the whole journal with `journal` in the current format. Used to
+/// initialize and by offline tooling.
 pub fn write_journal(db: &Database, journal: &Journal) -> Result<()> {
     let mut tx = db.begin_write()?;
     tx.set_durability(Durability::Immediate)?;
@@ -849,77 +719,15 @@ pub fn write_journal(db: &Database, journal: &Journal) -> Result<()> {
         .collect::<Vec<_>>()
     {
         ensure!(
-            name == HELPER.legacy || HELPER.owned.contains(&name.as_str()),
+            HELPER.owned.contains(&name.as_str()),
             "helper journal contains foreign table {name}"
         );
     }
-    tx.delete_table(LEGACY_JOURNAL)?;
     tx.delete_table(JOURNAL_CORE)?;
     tx.delete_table(JOBS)?;
     tx.delete_table(META)?;
     write_split_journal(&tx, journal.clone())?;
     tx.commit()?;
-    Ok(())
-}
-
-/// Writes `journal` in the retired single-row layout, replacing any state.
-/// Only tests that exercise format-1 tooling need this.
-#[cfg(test)]
-pub(crate) fn write_legacy_journal(db: &Database, journal: &Journal) -> Result<()> {
-    let mut tx = db.begin_write()?;
-    tx.set_durability(Durability::Immediate)?;
-    tx.delete_table(JOURNAL_CORE)?;
-    tx.delete_table(JOBS)?;
-    tx.delete_table(META)?;
-    tx.open_table(LEGACY_JOURNAL)?
-        .insert(0, serde_json::to_vec(journal)?.as_slice())?;
-    tx.commit()?;
-    Ok(())
-}
-
-/// Migrates a format-1 helper journal in place. Returns whether it did.
-pub fn migrate_journal(db: &Database) -> Result<bool> {
-    migrate_journal_with(db, || Ok(()))
-}
-
-#[doc(hidden)]
-pub fn migrate_journal_with(
-    db: &Database,
-    before_commit: impl FnOnce() -> Result<()>,
-) -> Result<bool> {
-    let mut tx = db.begin_write()?;
-    tx.set_durability(Durability::Immediate)?;
-    if write_layout(&tx, &HELPER)? == Layout::Split {
-        tx.abort()?;
-        return Ok(false);
-    }
-    let journal: Journal = {
-        let table = tx.open_table(LEGACY_JOURNAL)?;
-        let row = table
-            .get(0)?
-            .context("helper journal missing; refusing initialization")?;
-        serde_json::from_slice(row.value()).context("decoding legacy helper journal")?
-    };
-    write_split_journal(&tx, journal)?;
-    ensure!(
-        tx.delete_table(LEGACY_JOURNAL)?,
-        "legacy helper journal vanished during migration"
-    );
-    check_written_journal(&tx).context("migrated helper journal failed verification")?;
-    before_commit()?;
-    tx.commit()?;
-    Ok(true)
-}
-
-/// [`verify_journal`] against an uncommitted migration.
-fn check_written_journal(tx: &WriteTransaction) -> Result<()> {
-    ensure!(
-        write_layout(tx, &HELPER)? == Layout::Split,
-        "helper journal migration left an unrecognized layout"
-    );
-    let core = load_core(&tx.open_table(JOURNAL_CORE)?, "helper journal")?;
-    decode_journal_core(&core, true)?;
-    decode_jobs(&load_rows(&tx.open_table(JOBS)?)?, true)?;
     Ok(())
 }
 
@@ -1048,14 +856,14 @@ mod tests {
     #[test]
     fn layouts_are_classified_strictly() {
         let names = |n: &[&str]| n.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        assert_eq!(
-            classify(&CONTROLLER, &names(&["controller_catalog_v1"]), None).unwrap(),
-            Layout::Legacy
+        let retired = classify(&CONTROLLER, &names(&["controller_catalog_v1"]), None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            retired.contains("format 1") && retired.contains(LAST_MIGRATING_BUILD),
+            "{retired}"
         );
-        assert_eq!(
-            classify(&CONTROLLER, &names(CONTROLLER.owned), Some(FORMAT_VERSION)).unwrap(),
-            Layout::Split
-        );
+        classify(&CONTROLLER, &names(CONTROLLER.owned), Some(FORMAT_VERSION)).unwrap();
         let newer = classify(
             &CONTROLLER,
             &names(CONTROLLER.owned),

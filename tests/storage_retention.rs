@@ -12,7 +12,7 @@ use anyhow::bail;
 use hearth::control::{
     host::{Host, HostConfig, HostRequest},
     maintenance::{self, Pins, PruneStage},
-    persist::{self, Layout},
+    persist,
     protocol::{OperationStatus, Request, VmAction},
     retention,
     store::{Binding, Store},
@@ -304,15 +304,14 @@ fn dashboard_includes_all_unfinished_work_and_bounded_history() {
 }
 
 // ---------------------------------------------------------------------------
-// Format 1 -> 2 migration
+// Retired format 1
 // ---------------------------------------------------------------------------
 
 const LEGACY_CATALOG: TableDefinition<u8, &[u8]> = TableDefinition::new("controller_catalog_v1");
 const LEGACY_JOURNAL: TableDefinition<u8, &[u8]> = TableDefinition::new("host_journal_v1");
 const META: TableDefinition<&str, u64> = TableDefinition::new("hearth_meta");
 
-/// Writes `catalog` exactly as a format-1 binary stored it: one JSON row,
-/// operations, requests and audit inline, no format marker.
+/// Writes `value` as a format-1 binary stored it: one JSON row, no marker.
 fn write_format1(path: &Path, table: TableDefinition<u8, &[u8]>, value: &Value) {
     let db = Database::create(path).unwrap();
     let tx = db.begin_write().unwrap();
@@ -323,96 +322,34 @@ fn write_format1(path: &Path, table: TableDefinition<u8, &[u8]>, value: &Value) 
     tx.commit().unwrap();
 }
 
-/// A format-1 controller database built from the committed fixture.
-fn format1_controller(directory: &Path) -> (PathBuf, Value) {
-    let catalog: Value = serde_json::from_str(
-        &fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/format1-controller-catalog.json"
-        ))
-        .unwrap(),
-    )
-    .unwrap();
-    let path = directory.join("state.redb");
-    write_format1(&path, LEGACY_CATALOG, &catalog);
-    (path, catalog)
+fn assert_format1_refusal(error: anyhow::Error) {
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("retired storage format 1") && message.contains("the last build"),
+        "{message}"
+    );
 }
 
 #[test]
-fn format1_controller_fixture_migrates_once_and_old_layout_is_removed() {
-    let directory = tempfile::tempdir().unwrap();
-    let (path, fixture) = format1_controller(directory.path());
+fn format1_controller_is_refused_and_left_untouched() {
+    let (directory, store, _) = controller();
+    let catalog = serde_json::to_value(store.read_with_audit().unwrap()).unwrap();
+    drop(store);
+    let path = directory.path().join("legacy.redb");
+    write_format1(&path, LEGACY_CATALOG, &catalog);
+    assert_format1_refusal(Store::open(&path, &binding()).err().unwrap());
+    let db = Database::open(&path).unwrap();
+    assert_format1_refusal(persist::read_catalog(&db, true).unwrap_err());
+    assert_format1_refusal(persist::verify_catalog(&db).unwrap_err());
+    drop(db);
     assert_eq!(
         tables(&path),
         BTreeSet::from(["controller_catalog_v1".into()])
     );
-    {
-        let db = Database::open(&path).unwrap();
-        assert_eq!(persist::catalog_layout(&db).unwrap(), Layout::Legacy);
-    }
-    let store = Store::open(&path, &binding()).unwrap();
-    let migrated = serde_json::to_value(store.read_with_audit().unwrap()).unwrap();
-    assert_eq!(migrated, fixture);
-    let (audit, _) = store.audit_page(None, 1000).unwrap();
-    assert_eq!(
-        audit.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
-        (0..fixture["audit"].as_array().unwrap().len() as u64).collect::<Vec<_>>()
-    );
-    // The migrated store accepts writes, and exact retries still dedupe.
-    let admin = fixture["devices"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .find(|(_, device)| device["revoked"] == false)
-        .map(|(key, _)| key.clone())
-        .unwrap();
-    let (request_id, record) = fixture["operations"]
-        .as_object()
-        .unwrap()
-        .values()
-        .find(|r| r["public"]["kind"] == "create")
-        .map(|r| {
-            (
-                r["public"]["request_id"].as_str().unwrap().to_owned(),
-                r.clone(),
-            )
-        })
-        .unwrap();
-    let retried = store
-        .handle(&admin, create_vm(&request_id, "fixture-vm"))
-        .unwrap();
-    assert_eq!(retried["operation_id"], record["public"]["operation_id"]);
-    store
-        .handle(&admin, create_vm("after-migration", "later"))
-        .unwrap();
-    drop(store);
-
-    let after = tables(&path);
-    assert!(!after.contains("controller_catalog_v1"), "{after:?}");
-    for table in [
-        "hearth_meta",
-        "controller_core_v2",
-        "controller_operations_v2",
-        "controller_requests_v2",
-        "controller_audit_v2",
-    ] {
-        assert!(after.contains(table), "{table} missing from {after:?}");
-    }
-    {
-        let db = Database::open(&path).unwrap();
-        assert_eq!(persist::catalog_layout(&db).unwrap(), Layout::Split);
-        // Running the migration again is a no-op.
-        assert!(!persist::migrate_catalog(&db).unwrap());
-    }
-    let reopened = Store::open(&path, &binding()).unwrap();
-    assert_eq!(
-        reopened.read().unwrap().operations.len(),
-        fixture["operations"].as_object().unwrap().len() + 1
-    );
 }
 
 #[tokio::test]
-async fn format1_helper_journal_migrates_on_open() {
+async fn format1_helper_journal_is_refused_and_left_untouched() {
     let f = Pair::new().await;
     let journal = {
         let host = f.host().await;
@@ -423,73 +360,8 @@ async fn format1_helper_journal_migrates_on_open() {
     fs::remove_file(&path).unwrap();
     write_format1(&path, LEGACY_JOURNAL, &journal);
     fs::set_permissions(&path, permissions).unwrap();
-    {
-        let db = Database::open(&path).unwrap();
-        assert_eq!(persist::journal_layout(&db).unwrap(), Layout::Legacy);
-    }
-    let host = f.host().await;
-    assert_eq!(
-        serde_json::to_value(host.journal().unwrap()).unwrap(),
-        journal
-    );
-    drop(host);
-    let after = tables(&path);
-    assert!(!after.contains("host_journal_v1"), "{after:?}");
-    assert!(after.contains("host_journal_core_v2") && after.contains("host_jobs_v2"));
-}
-
-#[test]
-fn interrupted_migration_leaves_format1_intact_and_retries() {
-    let directory = tempfile::tempdir().unwrap();
-    let (path, fixture) = format1_controller(directory.path());
-    let db = Database::open(&path).unwrap();
-    let error = persist::migrate_catalog_with(&db, || bail!("injected failure")).unwrap_err();
-    assert!(format!("{error:#}").contains("injected failure"));
-    assert_eq!(persist::catalog_layout(&db).unwrap(), Layout::Legacy);
-    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        persist::migrate_catalog_with(&db, || panic!("injected panic"))
-    }));
-    assert!(panicked.is_err());
-    assert_eq!(persist::catalog_layout(&db).unwrap(), Layout::Legacy);
-    drop(db);
-    assert_eq!(
-        tables(&path),
-        BTreeSet::from(["controller_catalog_v1".into()])
-    );
-
-    // A process killed just before the commit (no destructors run).
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "migration_crash_child",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env("HEARTH_MIGRATION_CRASH_FIXTURE", &path)
-        .status()
-        .unwrap();
-    assert_eq!(status.code(), Some(0));
-    assert_eq!(
-        tables(&path),
-        BTreeSet::from(["controller_catalog_v1".into()])
-    );
-
-    let store = Store::open(&path, &binding()).unwrap();
-    assert_eq!(
-        serde_json::to_value(store.read_with_audit().unwrap()).unwrap(),
-        fixture
-    );
-}
-
-/// Child half of the crash test above: exits mid-migration.
-#[test]
-fn migration_crash_child() {
-    let Some(path) = std::env::var_os("HEARTH_MIGRATION_CRASH_FIXTURE") else {
-        return;
-    };
-    let db = Database::open(path).unwrap();
-    persist::migrate_catalog_with(&db, || std::process::exit(0)).unwrap();
-    unreachable!("the hook exits before the commit");
+    assert_format1_refusal(Host::open(f.host_config()).await.err().unwrap());
+    assert_eq!(tables(&path), BTreeSet::from(["host_journal_v1".into()]));
 }
 
 // ---------------------------------------------------------------------------
@@ -1102,41 +974,4 @@ async fn retention_keeps_unfinished_work_and_everything_connected_to_it() {
     // Recent history stays.
     let plan = retention::plan(&catalog, &audit, &journal, now() - DAY).unwrap();
     assert!(plan.is_empty());
-}
-
-#[test]
-fn format1_database_with_a_foreign_table_is_refused_before_migrating() {
-    let directory = tempfile::tempdir().unwrap();
-    let (path, fixture) = format1_controller(directory.path());
-    {
-        let db = Database::open(&path).unwrap();
-        let tx = db.begin_write().unwrap();
-        tx.open_table(TableDefinition::<u64, u64>::new("operator_scratch"))
-            .unwrap()
-            .insert(1, 1)
-            .unwrap();
-        tx.commit().unwrap();
-    }
-    let error = Store::open(&path, &binding()).err().expect("refused");
-    assert!(
-        format!("{error:#}").contains("operator_scratch"),
-        "{error:#}"
-    );
-    // Nothing was migrated: once the stray table is removed, the deployed
-    // layout opens and migrates losslessly.
-    assert!(tables(&path).contains("controller_catalog_v1"));
-    {
-        let db = Database::open(&path).unwrap();
-        let tx = db.begin_write().unwrap();
-        assert!(
-            tx.delete_table(TableDefinition::<u64, u64>::new("operator_scratch"))
-                .unwrap()
-        );
-        tx.commit().unwrap();
-    }
-    let store = Store::open(&path, &binding()).unwrap();
-    assert_eq!(
-        serde_json::to_value(store.read_with_audit().unwrap()).unwrap(),
-        fixture
-    );
 }

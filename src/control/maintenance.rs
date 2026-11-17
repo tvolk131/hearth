@@ -21,7 +21,7 @@ use super::{
     transport::ServerConfig,
 };
 
-use super::persist::{self, Layout};
+use super::persist;
 /// Ceiling for small maintenance inputs: configuration, keys, markers.
 const LIMIT: u64 = 64 * 1024 * 1024;
 /// Ceiling for a backup bundle, which carries all retained history. Bundles
@@ -280,19 +280,15 @@ fn create_database(path: &Path, init: impl FnOnce(&Database) -> Result<()>) -> R
     Ok(())
 }
 
-/// Reads a stopped controller's full catalog, from either storage format,
-/// refusing a newer format or fields this build would drop.
+/// Reads a stopped controller's full catalog, refusing a retired or newer
+/// format or fields this build would drop.
 fn read_live_catalog(db: &Database) -> Result<Catalog> {
-    if persist::catalog_layout(db)? == Layout::Split {
-        persist::verify_catalog(db)?;
-    }
+    persist::verify_catalog(db)?;
     persist::read_catalog(db, true)
 }
 
 fn read_live_journal(db: &Database) -> Result<Journal> {
-    if persist::journal_layout(db)? == Layout::Split {
-        persist::verify_journal(db)?;
-    }
+    persist::verify_journal(db)?;
     persist::read_journal(db)
 }
 
@@ -1165,12 +1161,6 @@ pub fn prune_with(
     ensure!(
         read(&helper.join("initialized"))? == format!("{}\n", pins.environment).as_bytes(),
         "helper initialization incomplete"
-    );
-    ensure!(
-        persist::catalog_layout(&controller_lock)? == Layout::Split
-            && persist::journal_layout(&helper_lock)? == Layout::Split,
-        "state is still in storage format 1; start the upgraded controller and helper once so \
-         they migrate it, then prune"
     );
     persist::verify_catalog(&controller_lock)?;
     persist::verify_journal(&helper_lock)?;

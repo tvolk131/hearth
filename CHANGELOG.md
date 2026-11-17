@@ -17,6 +17,11 @@ Notes on what these entries refer to:
 
 ## Unreleased
 
+- Removed storage format-1 migration and the `hearth-host repair-managed-schema`
+  tool, which only worked on format-1 journals. Both managed hosts were
+  migrated with `e619ef0`. A format-1 database is now refused without being
+  modified, and the error names `e619ef0` as the last build that migrates it.
+  Backup bundles from either format still verify and restore.
 - Renamed the binaries and app to Hearth: `pve-devd` is now `hearthd`,
   `pve-dev-host` is `hearth-host`, `pve-devctl` is `hearth`, `pve-dev-ops` is
   `hearth-ops` and `pve-dev-inventory` is `hearth-inventory`. The crate is
