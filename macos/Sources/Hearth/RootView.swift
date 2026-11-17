@@ -9,6 +9,31 @@ enum SidebarItem: Hashable {
   case pending
   case users
   case devices
+  /// One read-only SSH host's observation page.
+  case host(UUID)
+
+  /// Pages that list every controller and filter by server in the page itself.
+  var spansAllServers: Bool {
+    switch self {
+    case .overview, .machines, .operations, .pending: true
+    default: false
+    }
+  }
+}
+
+extension AppModel {
+  /// Controllers a single-server page can show, for its in-page server picker.
+  /// Empty for pages that span every server or belong to one read-only host.
+  func scopeServers(for page: SidebarItem) -> [ServerProfile] {
+    let admin = fleetServers.filter { isAdmin(onServer: $0.id) }
+    switch page {
+    case .users: return admin
+    case .devices: return admin.filter { dashboard(forServer: $0.id)?.backend != .managed }
+    case .transfers:
+      return admin.filter { dashboard(forServer: $0.id)?.supports("migration") == true }
+    default: return []
+    }
+  }
 }
 
 struct RootView: View {
@@ -19,25 +44,41 @@ struct RootView: View {
   @State private var enrollOrigin: MutationOrigin?
   @State private var createOrigin: MutationOrigin?
 
+  private static let scopedPages: [SidebarItem] = [.users, .devices, .transfers]
+  private var scopeAvailability: [[UUID]] {
+    Self.scopedPages.map { model.scopeServers(for: $0).map(\.id) }
+  }
+  private var readOnlyHosts: [ServerProfile] { model.settings.servers.filter(\.isReadOnly) }
+
   var body: some View {
     presentedSplitView
-      .onChange(of: model.permissions.isAdmin) { _, isAdmin in
-        if !isAdmin, selection == .users || selection == .devices || selection == .transfers {
-          selection = .overview
-        }
-      }
-      .onChange(of: model.dashboard?.capabilities) { _, _ in
-        if selection == .transfers && model.dashboard?.supports("migration") != true {
-          selection = .overview
-        }
+      .onChange(of: scopeAvailability) { _, _ in syncSelectedServer(for: selection) }
+      .onChange(of: readOnlyHosts.map(\.id)) { _, ids in
+        if case .host(let id) = selection, !ids.contains(id) { selection = .overview }
       }
       .onChange(of: model.requestOrigin) { _, origin in
         // Enrollment reviews against the selected server; a different selection closes it.
         if enrollOrigin != nil && enrollOrigin != origin { enrollOrigin = nil }
       }
-      .onChange(of: model.isReadOnly) { _, readOnly in
-        if readOnly, selection != .overview && selection != .machines { selection = .overview }
+  }
+
+  /// Single-server pages keep using the app's selected server, chosen with the
+  /// picker in the page. Opening one selects a server that page can show; a
+  /// read-only host page selects that host. Pages spanning every server leave
+  /// the selection alone.
+  private func syncSelectedServer(for page: SidebarItem?) {
+    switch page {
+    case .host(let id):
+      if model.selectedServerId != id { model.selectServer(id) }
+    case .some(let scoped) where Self.scopedPages.contains(scoped):
+      let servers = model.scopeServers(for: scoped)
+      if servers.isEmpty {
+        selection = .overview
+      } else if !servers.contains(where: { $0.id == model.selectedServerId }) {
+        model.selectServer(servers[0].id)
       }
+    default: break
+    }
   }
 
   private var presentedSplitView: some View {
@@ -57,12 +98,16 @@ struct RootView: View {
       .sheet(item: $createOrigin) { origin in CreateVmSheet(origin: origin) }
       .sheet(item: $enrollOrigin) { origin in EnrollmentSheet(origin: origin) }
       .onChange(of: selection) { _, page in
-        model.fleetPageActive = page == .overview || page == .machines
+        model.fleetPageActive = (page ?? .overview).spansAllServers
+        syncSelectedServer(for: page)
       }
-      .onAppear { model.fleetPageActive = selection == .overview || selection == .machines }
+      .onAppear {
+        model.fleetPageActive = (selection ?? .overview).spansAllServers
+        syncSelectedServer(for: selection)
+      }
   }
 
-  private var isFleetPage: Bool { selection == .overview || selection == .machines }
+  private var isFleetPage: Bool { (selection ?? .overview).spansAllServers }
   private var scopedViewIdentity: MutationOrigin? {
     isFleetPage ? nil : model.requestOrigin
   }
@@ -97,29 +142,34 @@ struct RootView: View {
 
   private var sidebar: some View {
     List(selection: $selection) {
-      Section(model.isReadOnly ? "Read-only Host" : "Cloud") {
+      Section("Cloud") {
         Label("Servers", systemImage: "server.rack")
           .tag(SidebarItem.overview)
         Label("Virtual Machines", systemImage: "desktopcomputer")
-          .badge(model.isReadOnly ? (model.observation?.vms.count ?? 0) : model.fleetVmCount)
+          .badge(model.fleetVmCount)
           .tag(SidebarItem.machines)
-        if !model.isReadOnly {
-          Label("Operations", systemImage: "list.bullet.rectangle")
-            .badge(model.activeOperationCount)
-            .tag(SidebarItem.operations)
-          if model.permissions.isAdmin && model.dashboard?.supports("migration") == true {
-            Label("Transfers", systemImage: "arrow.left.arrow.right").tag(SidebarItem.transfers)
+        Label("Operations", systemImage: "list.bullet.rectangle")
+          .badge(model.activeOperationCount)
+          .tag(SidebarItem.operations)
+        if !model.scopeServers(for: .transfers).isEmpty {
+          Label("Transfers", systemImage: "arrow.left.arrow.right").tag(SidebarItem.transfers)
+        }
+        Label("Pending Requests", systemImage: "tray.full")
+          .badge(model.unresolvedCount)
+          .tag(SidebarItem.pending)
+      }
+      if !readOnlyHosts.isEmpty {
+        Section("Read-only Hosts") {
+          ForEach(readOnlyHosts) { host in
+            Label(host.name, systemImage: "eye").lineLimit(1).tag(SidebarItem.host(host.id))
           }
-          Label("Pending Requests", systemImage: "tray.full")
-            .badge(model.unresolvedCount)
-            .tag(SidebarItem.pending)
         }
       }
-      if model.permissions.isAdmin {
+      if !model.scopeServers(for: .users).isEmpty {
         Section("Administration") {
           Label("Users", systemImage: "person.2")
             .tag(SidebarItem.users)
-          if model.dashboard?.backend != .managed {
+          if !model.scopeServers(for: .devices).isEmpty {
             Label("Devices", systemImage: "laptopcomputer.and.iphone")
               .tag(SidebarItem.devices)
           }
@@ -127,62 +177,101 @@ struct RootView: View {
       }
     }
     .navigationSplitViewColumnWidth(min: 200, ideal: 220)
-    .safeAreaInset(edge: .top) {
-      if !model.settings.servers.isEmpty && (model.isReadOnly || !isFleetPage) {
-        Picker(
-          "Server",
-          selection: Binding(
-            get: { model.selectedServerId },
-            set: { if let id = $0 { model.selectServer(id) } })
-        ) {
-          ForEach(model.settings.servers) { server in
-            Text(server.name).tag(Optional(server.id))
-          }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .accessibilityIdentifier("selected-server")
-      }
-    }
     .safeAreaInset(edge: .bottom) {
-      IdentityFooter(global: selection == .overview || selection == .machines)
+      IdentityFooter(global: isFleetPage)
     }
   }
 
   @ViewBuilder
   private var detail: some View {
-    if model.isReadOnly {
-      if !model.isConfigured {
+    switch selection ?? .overview {
+    case .host(let id):
+      if model.selectedServerId != id {
+        ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else if !model.isConfigured {
         NotConfiguredView(issues: model.configurationIssues)
       } else {
-        ObservedHostView(machinesOnly: selection == .machines)
+        ObservedHostView(machinesOnly: false)
       }
-    } else if selection == .pending {
-      PendingRequestsView()
-    } else if !model.isConfigured && selection != .overview && selection != .machines {
-      NotConfiguredView(issues: model.configurationIssues)
-    } else {
-      switch selection ?? .overview {
-      case .overview: ServersView()
-      case .machines: FleetVirtualMachinesView(showDeleted: $showDeleted)
-      case .operations: OperationsView(showCompleted: $showCompleted)
-      case .transfers: MigrationTransfersView()
-      case .pending: PendingRequestsView()
-      case .users: AdminUsersView(origin: model.requestOrigin)
-      case .devices: AdminDevicesView(origin: model.requestOrigin)
+    case .overview: ServersView()
+    case .machines: FleetVirtualMachinesView(showDeleted: $showDeleted)
+    case .operations: OperationsView(showCompleted: $showCompleted)
+    case .pending: PendingRequestsView()
+    case .transfers:
+      ServerScopedPage(servers: model.scopeServers(for: .transfers)) { MigrationTransfersView() }
+    case .users:
+      ServerScopedPage(servers: model.scopeServers(for: .users)) {
+        AdminUsersView(origin: model.requestOrigin)
+      }
+    case .devices:
+      ServerScopedPage(servers: model.scopeServers(for: .devices)) {
+        AdminDevicesView(origin: model.requestOrigin)
       }
     }
   }
 
   private var hasStatusMessages: Bool {
-    model.isReadOnly
-      || (!model.fleetPageActive && model.refreshFailure != nil
+    let fleet = model.fleetPageActive
+    return (!fleet && model.isReadOnly)
+      || (!fleet && model.refreshFailure != nil
         && (model.dashboard != nil || model.observation != nil))
-      || (!model.fleetPageActive && model.selectedServerId.map(model.autoRefreshPaused) == true)
+      || (!fleet && model.selectedServerId.map(model.autoRefreshPaused) == true)
       || model.ledgerStorageIssue != nil
-      || (model.fleetPageActive ? model.ledger.entries : model.pendingForCurrentProfile).contains {
+      || (fleet ? model.ledger.entries : model.pendingForCurrentProfile).contains {
         $0.phase != .rejected && !$0.isInFlight
       }
+  }
+}
+
+/// A page that works on one controller at a time. Its in-page picker chooses
+/// the app's selected server among the controllers this page can show; changing
+/// it rebuilds the page so no draft or review carries over to another server.
+struct ServerScopedPage<Content: View>: View {
+  @Environment(AppModel.self) private var model
+  let servers: [ServerProfile]
+  @ViewBuilder let content: () -> Content
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      if servers.count > 1 || !servers.contains(where: { $0.id == model.selectedServerId }) {
+        HStack {
+          Picker(
+            "Server",
+            selection: Binding(
+              get: { model.selectedServerId },
+              set: { if let id = $0 { model.selectServer(id) } })
+          ) {
+            ForEach(servers) { Text($0.name).tag(UUID?.some($0.id)) }
+          }
+          .fixedSize()
+          .accessibilityIdentifier("selected-server")
+          Spacer()
+        }
+        .padding(.horizontal, 20)
+      } else if let server = servers.first {
+        Label(server.name, systemImage: "server.rack")
+          .font(.callout.weight(.medium))
+          .foregroundStyle(.secondary)
+          .padding(.horizontal, 20)
+      }
+      if servers.isEmpty {
+        ContentUnavailableView(
+          "Administrator access required", systemImage: "lock",
+          description: Text(
+            "None of your servers lists you as an administrator for this page. The server decides permissions."))
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else if !servers.contains(where: { $0.id == model.selectedServerId }) {
+        ContentUnavailableView(
+          "Choose a server", systemImage: "server.rack",
+          description: Text("Pick the server this page should show."))
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else if !model.isConfigured {
+        NotConfiguredView(issues: model.configurationIssues)
+      } else {
+        content()
+      }
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
   }
 }
 
@@ -241,14 +330,14 @@ struct MainToolbar: ToolbarContent {
 
   var body: some ToolbarContent {
     ToolbarItemGroup(placement: .primaryAction) {
-      if !model.isReadOnly && selection == .operations {
+      if selection == .operations {
         Toggle("Show Completed", isOn: $showCompleted)
           .toggleStyle(.checkbox)
           .fixedSize()
           .padding(.leading, 12)
           .padding(.trailing, 14)
       }
-      if !model.isReadOnly && selection == .machines {
+      if selection == .machines {
         Toggle("Show Deleted", isOn: $showDeleted)
           .toggleStyle(.checkbox)
           .fixedSize()
@@ -289,8 +378,7 @@ struct MainToolbar: ToolbarContent {
         }
         .help("Choose a server for the new VM. Unavailable servers explain why.")
       }
-      RefreshButton(
-        fleet: selection == .machines || selection == .overview, inventory: selection == .overview)
+      RefreshButton(fleet: selection.spansAllServers, inventory: selection == .overview)
     }
   }
 }

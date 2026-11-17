@@ -74,6 +74,10 @@ pub enum RecoveryKind {
     /// Cancel only a root-proven, failed managed qmstart attempt. This neither
     /// starts the VM nor releases its allocation; a fresh start is separate.
     AcknowledgeFailedStart,
+    /// Cancel a blocked managed start, shutdown, stop or delete that the
+    /// helper refused before any step recorded an intent, task or identity.
+    /// Nothing changed, so the VM keeps its state, data and allocation.
+    AcknowledgeRefusal,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -220,6 +224,21 @@ pub fn validate_catalog(c: &super::store::Catalog) -> anyhow::Result<()> {
                             "failed-start recovery differs from the exact managed operation"
                         );
                     }
+                    if spec.kind == RecoveryKind::AcknowledgeRefusal {
+                        ensure!(
+                            c.binding.managed.is_some()
+                                && matches!(
+                                    original.public.kind,
+                                    JobKind::Start
+                                        | JobKind::Shutdown
+                                        | JobKind::Stop
+                                        | JobKind::Delete
+                                )
+                                && original.job.owner == r.job.owner
+                                && original.job.vm == r.job.vm,
+                            "refusal recovery differs from the exact managed operation"
+                        );
+                    }
                 }
             }
         }
@@ -229,7 +248,7 @@ pub fn validate_catalog(c: &super::store::Catalog) -> anyhow::Result<()> {
         {
             ensure!(c.operations.values().any(|recovery| recovery.public.status == OperationStatus::Verified
                 && matches!(recovery.job.extension.as_deref(), Some(JobExtension::Recover(spec))
-                    if spec.operation_id == r.public.operation_id && spec.kind == RecoveryKind::AcknowledgeFailedStart)),
+                    if spec.operation_id == r.public.operation_id && matches!(spec.kind, RecoveryKind::AcknowledgeFailedStart | RecoveryKind::AcknowledgeRefusal))),
                 "managed start cancellation lacks a verified acknowledgment");
         }
     }
@@ -300,6 +319,20 @@ pub fn validate_journal(j: &super::host::Journal) -> anyhow::Result<()> {
                             "helper failed-start recovery differs from the exact managed operation"
                         );
                     }
+                    if spec.kind == RecoveryKind::AcknowledgeRefusal {
+                        ensure!(
+                            j.binding.managed.is_some()
+                                && matches!(
+                                    original.job.kind,
+                                    JobKind::Start
+                                        | JobKind::Shutdown
+                                        | JobKind::Stop
+                                        | JobKind::Delete
+                                )
+                                && original.job.vm == r.job.vm,
+                            "helper refusal recovery differs from the exact managed operation"
+                        );
+                    }
                 }
             }
             if r.job.kind == JobKind::GrowVm
@@ -315,7 +348,7 @@ pub fn validate_journal(j: &super::host::Journal) -> anyhow::Result<()> {
         {
             ensure!(j.jobs.values().any(|recovery| recovery.steps.iter().any(|step| step.step == Step::Recover && step.phase == Phase::Verified)
                 && matches!(recovery.job.extension.as_deref(), Some(JobExtension::Recover(spec))
-                    if spec.operation_id == r.job.operation_id && spec.kind == RecoveryKind::AcknowledgeFailedStart)),
+                    if spec.operation_id == r.job.operation_id && matches!(spec.kind, RecoveryKind::AcknowledgeFailedStart | RecoveryKind::AcknowledgeRefusal))),
                 "helper managed start cancellation lacks a verified acknowledgment");
         }
     }

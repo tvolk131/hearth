@@ -30,12 +30,14 @@ public enum RecoveryAction: String, Codable, Hashable, Sendable, CaseIterable {
     case resumeVerifiedEffect = "resume_verified_effect"
     case abortPreparation = "abort_preparation"
     case acknowledgeFailedStart = "acknowledge_failed_start"
+    case acknowledgeRefusal = "acknowledge_refusal"
 
     public var title: String {
         switch self {
         case .resumeVerifiedEffect: "Resume Verified Effect"
         case .abortPreparation: "Abort Preparation"
         case .acknowledgeFailedStart: "Acknowledge Failed Start"
+        case .acknowledgeRefusal: "Acknowledge Refusal"
         }
     }
     public var explanation: String {
@@ -43,6 +45,7 @@ public enum RecoveryAction: String, Codable, Hashable, Sendable, CaseIterable {
         case .resumeVerifiedEffect: "Record the effect independently verified by this inspection and continue the existing operation."
         case .abortPreparation: "Abort this preparation using the server's verified recovery path."
         case .acknowledgeFailedStart: "Close this failed start attempt after the server verifies the failed Proxmox task, stopped guest and original resource identities. The VM and its data remain allocated. You can then request a new Start."
+        case .acknowledgeRefusal: "Close this operation, which the server refused before changing anything. Its reason stays in the history; the VM and its data are unchanged. Fix the cause, then request the action again."
         }
     }
 }
@@ -122,6 +125,15 @@ public enum OperationPresentation {
         case "enroll_vm": "Enroll virtual machine"
         case "migrate_vm": "Move virtual machine"
         default: SafeText.sanitize(kind.replacingOccurrences(of: "_", with: " "), limit: 80)
+        }
+    }
+
+    /// A readable label for an inspection's classification; unknown values are shown sanitized.
+    public static func classification(_ value: String) -> String {
+        switch value {
+        case "refused_before_effect": "Refused before any change"
+        case "known_failed_start": "Proven failed start"
+        default: SafeText.sanitize(value, limit: 160)
         }
     }
 

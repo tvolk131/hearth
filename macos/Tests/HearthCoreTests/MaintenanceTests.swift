@@ -74,6 +74,23 @@ struct MaintenanceTests {
         #expect(unoffered.offeredActions.isEmpty)
     }
 
+    @Test func refusalAcknowledgmentDecodesEncodesAndExplainsItself() throws {
+        let bytes = Data(#"{"operation":{"operation_id":"refused","owner":"setup-check","request_id":"original","kind":"delete","vm_id":9201,"status":"blocked","step":"planned","error":"helper refused","created_at":1},"inspection_id":"exact-proof","observed_at":2,"classification":"refused_before_effect","evidence":[],"allowed_actions":["acknowledge_refusal"]}"#.utf8)
+        let inspection = try JSONDecoder().decode(OperationInspection.self, from: bytes)
+        #expect(inspection.offeredActions == [.acknowledgeRefusal])
+        #expect(OperationPresentation.classification(inspection.classification) == "Refused before any change")
+        #expect(RecoveryAction.acknowledgeRefusal.title == "Acknowledge Refusal")
+        #expect(RecoveryAction.acknowledgeRefusal.explanation.contains("refused before changing anything"))
+        let request = RpcRequest.recoverOperation(RecoverOperationRequest(requestId: UUID(), operationId: inspection.operation.operationId,
+            inspectionId: inspection.inspectionId, kind: .acknowledgeRefusal, confirmRecovery: true))
+        let wire = try WireCoding.encodeRequest(request)
+        let object = try JSONSerialization.jsonObject(with: wire) as! [String: Any]
+        #expect(object["kind"] as? String == "acknowledge_refusal")
+        #expect(try JSONDecoder().decode(RpcRequest.self, from: wire) == request)
+        var settled = inspection; settled.operation.status = .cancelled
+        #expect(settled.offeredActions.isEmpty)
+    }
+
     @Test func oldOperationsDecodeWithoutTimingAndNewTimingIsBounded() throws {
         let old = Data(#"{"operation_id":"o","owner":"alice","request_id":"r","kind":"shrink_vm","vm_id":9001,"status":"running","step":"shrink_stage","error":null,"created_at":1}"#.utf8)
         #expect(try JSONDecoder().decode(OperationRecord.self, from: old).progress == nil)

@@ -996,10 +996,14 @@ impl Store {
             if !confirm || !catalog.binding.feature("recovery") || !super::host::valid_operation_id(inspection_id) {return Err(failure("invalid","an exact reviewed inspection and explicit recovery acknowledgment are required"));}
             let original=catalog.operations.get(operation_id).ok_or_else(||failure("invalid","original operation missing"))?.clone();
             if original.public.status!=OperationStatus::Blocked {return Err(failure("conflict","original operation is no longer blocked"));}
-            if (catalog.binding.managed.is_some()
-                && (kind != super::vm_change::RecoveryKind::AcknowledgeFailedStart || original.public.kind != JobKind::Start))
-                || (catalog.binding.managed.is_none() && kind == super::vm_change::RecoveryKind::AcknowledgeFailedStart)
-            {return Err(failure("forbidden","failed-start acknowledgment is limited to managed start operations"));}
+            let managed_kind=match kind {
+                super::vm_change::RecoveryKind::AcknowledgeFailedStart=>original.public.kind==JobKind::Start,
+                super::vm_change::RecoveryKind::AcknowledgeRefusal=>matches!(original.public.kind,JobKind::Start|JobKind::Shutdown|JobKind::Stop|JobKind::Delete),
+                _=>false,
+            };
+            let acknowledgment=matches!(kind,super::vm_change::RecoveryKind::AcknowledgeFailedStart|super::vm_change::RecoveryKind::AcknowledgeRefusal);
+            if (catalog.binding.managed.is_some() && !managed_kind) || (catalog.binding.managed.is_none() && acknowledgment)
+            {return Err(failure("forbidden","managed recovery is limited to failed starts and to starts, stops, shutdowns and deletes refused before any effect"));}
             let accepted=queue(catalog,&actor,request_id,&fingerprint,JobKind::RecoverOperation,original.job.owner.clone(),original.job.vm.clone());
             let id=accepted["operation_id"].as_str().expect("operation ID");
             catalog.operations.get_mut(id).expect("queued recovery").job.extension=Some(Box::new(super::vm_change::JobExtension::Recover(super::vm_change::RecoverySpec{operation_id:operation_id.into(),inspection_id:inspection_id.into(),kind})));
@@ -1420,15 +1424,23 @@ impl Store {
                 let original=catalog.operations.get_mut(&spec.operation_id).ok_or_else(||failure("internal","original operation missing"))?;
                 if original.public.status!=OperationStatus::Blocked {return Err(failure("internal","original recovery state changed"));}
                 let kind=original.public.kind;let vm_id=original.public.vm_id;
-                if spec.kind != super::vm_change::RecoveryKind::AcknowledgeFailedStart {original.public.error=None;}
+                if !matches!(spec.kind,super::vm_change::RecoveryKind::AcknowledgeFailedStart|super::vm_change::RecoveryKind::AcknowledgeRefusal) {original.public.error=None;}
+                let prior_state=original.job.vm.as_ref().map(|vm|vm.state.clone());
                 match spec.kind {
                     super::vm_change::RecoveryKind::ResumeVerifiedEffect=>{original.public.status=OperationStatus::Queued;original.public.step="reconciled_waiting_for_helper".into();}
                     super::vm_change::RecoveryKind::AbortPreparation=>{original.public.status=OperationStatus::Cancelled;original.public.step="cancelled".into();}
                     super::vm_change::RecoveryKind::AcknowledgeFailedStart=>{original.public.status=OperationStatus::Cancelled;original.public.step="failed_start_acknowledged".into();}
+                    super::vm_change::RecoveryKind::AcknowledgeRefusal=>{original.public.status=OperationStatus::Cancelled;original.public.step="refusal_acknowledged".into();}
                 }
                 if let Some(vm_id)=vm_id {
                     let vm=catalog.vms.get_mut(&vm_id).ok_or_else(||failure("internal","recovered VM missing"))?;
-                    vm.state=if matches!(spec.kind,super::vm_change::RecoveryKind::AbortPreparation | super::vm_change::RecoveryKind::AcknowledgeFailedStart) {VmState::Stopped}else{VmState::Creating};
+                    // A refused operation changed nothing: restore the state
+                    // the VM had when it was requested.
+                    vm.state=match spec.kind {
+                        super::vm_change::RecoveryKind::AcknowledgeRefusal=>prior_state.ok_or_else(||failure("internal","refused operation lacks its VM"))?,
+                        super::vm_change::RecoveryKind::AbortPreparation|super::vm_change::RecoveryKind::AcknowledgeFailedStart=>VmState::Stopped,
+                        super::vm_change::RecoveryKind::ResumeVerifiedEffect=>VmState::Creating,
+                    };
                     if spec.kind==super::vm_change::RecoveryKind::AbortPreparation {
                         if kind==JobKind::ShrinkVm {catalog.disk_shrinks.remove(&vm_id);}
                         if kind==JobKind::GrowVm {catalog.disk_growths.remove(&vm_id);}

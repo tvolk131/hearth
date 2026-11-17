@@ -499,8 +499,8 @@ impl HostBinding {
         }
         ensure!(
             !matches!(job.extension.as_deref(), Some(super::vm_change::JobExtension::Recover(spec))
-            if spec.kind == super::vm_change::RecoveryKind::AcknowledgeFailedStart),
-            "failed-start acknowledgment requires a managed binding"
+            if matches!(spec.kind, super::vm_change::RecoveryKind::AcknowledgeFailedStart | super::vm_change::RecoveryKind::AcknowledgeRefusal)),
+            "failed-start and refusal acknowledgments require a managed binding"
         );
         ensure!(
             self.physical_trial
@@ -3414,8 +3414,8 @@ impl Host {
                         .get(&operation_id)
                         .context("operation not found")?;
                     ensure!(
-                        job.job.kind == JobKind::Start,
-                        "managed inspection is limited to failed starts"
+                        job.job.kind == JobKind::Start || recovery::refused_before_effect(job),
+                        "managed inspection is limited to failed starts and operations refused before any effect"
                     );
                     self.binding.validate_job(&job.job)?;
                 }

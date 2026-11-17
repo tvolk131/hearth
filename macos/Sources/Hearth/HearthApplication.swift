@@ -31,11 +31,19 @@ struct HearthApplication: App {
           .disabled(
             model.fleetPageActive
               ? model.fleetIsRefreshing : (!model.isConfigured || model.isRefreshing))
-        Toggle(
-          "Auto-refresh \(model.selectedServer?.name ?? "Selected Server") Every \(model.settings.clampedPollingInterval)s",
-          isOn: Binding(get: { model.settings.pollingEnabled }, set: { model.setPolling($0) })
-        )
-        .disabled(!model.isConfigured)
+        // Auto-refresh is chosen per server; each server polls only itself.
+        Menu("Auto-refresh Every \(model.settings.clampedPollingInterval)s") {
+          ForEach(model.settings.servers) { server in
+            Toggle(
+              server.name,
+              isOn: Binding(
+                get: { model.pollingEnabled(forServer: server.id) },
+                set: { model.setPolling($0, forServer: server.id) })
+            )
+            .disabled(!server.isTrusted)
+          }
+        }
+        .disabled(model.settings.servers.isEmpty)
       }
     }
 

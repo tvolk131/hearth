@@ -17,6 +17,11 @@ Notes on what these entries refer to:
 
 ## Unreleased
 
+- Managed recovery can now close a blocked start, shutdown, stop or delete
+  that the helper refused before any step began (`acknowledge_refusal`;
+  `hearth operations recover --kind acknowledge-refusal`). Before this, only
+  failed starts could be inspected or recovered on a managed host, so a delete
+  refused because of leftover snapshots stayed blocked with no way to clear it.
 - Removed storage format-1 migration and the `hearth-host repair-managed-schema`
   tool, which only worked on format-1 journals. Both managed hosts were
   migrated with `e619ef0`. A format-1 database is now refused without being

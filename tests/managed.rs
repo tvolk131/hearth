@@ -786,3 +786,88 @@ fn reviewed_failed_start_cancellation_retains_allocation_and_exact_retry_identit
     assert_eq!(vm["vm_id"], 9201);
     assert_eq!(f.store.read().unwrap().vms.len(), 1);
 }
+
+#[test]
+fn reviewed_refusal_cancels_a_blocked_delete_and_restores_the_vm() {
+    use hearth::control::vm_change::{JobExtension, RecoveryKind};
+    let f = fixture(managed());
+    f.store
+        .handle(&f.peer, create("alex", "refused-delete-vm"))
+        .unwrap();
+    complete(&f.store);
+    assert_eq!(f.store.read().unwrap().vms[&9201].state, VmState::Stopped);
+    let delete = |request_id: &str| Request::VmAction {
+        request_id: request_id.into(),
+        vm_id: 9201,
+        kind: VmAction::Delete,
+    };
+    let accepted = f.store.handle(&f.peer, delete("first-delete")).unwrap();
+    let id = accepted["operation_id"].as_str().unwrap();
+    let reason = "delete step verify: allocation retains snapshots/bookmarks";
+    f.store
+        .progress(id, OperationStatus::Blocked, "verify", Some(reason.into()))
+        .unwrap();
+    assert!(f.store.handle(&f.peer, delete("second-delete")).is_err());
+    let before = f.store.handle(&f.peer, Request::Dashboard {}).unwrap();
+    let review = "a".repeat(64);
+    let recovered = f
+        .store
+        .queue_reviewed_recovery(
+            &f.peer,
+            "ack-refusal",
+            id,
+            &review,
+            RecoveryKind::AcknowledgeRefusal,
+            true,
+        )
+        .unwrap();
+    let recovery_id = recovered["operation_id"].as_str().unwrap();
+    let recovery = f.store.read().unwrap().operations[recovery_id].job.clone();
+    helper(&f.binding).validate_job(&recovery).unwrap();
+    assert!(
+        matches!(recovery.extension.as_deref(),Some(JobExtension::Recover(s)) if s.kind==RecoveryKind::AcknowledgeRefusal)
+    );
+    // Catalog-only: a verified helper decision stands in for the root
+    // adapter, whose refusal checks are unit-tested in the helper.
+    f.store
+        .progress(recovery_id, OperationStatus::Verified, "complete", None)
+        .unwrap();
+    let c = f.store.read().unwrap();
+    assert_eq!(c.operations[id].public.status, OperationStatus::Cancelled);
+    assert_eq!(c.operations[id].public.step, "refusal_acknowledged");
+    assert_eq!(c.operations[id].public.error.as_deref(), Some(reason));
+    assert_eq!(c.vms[&9201].state, VmState::Stopped);
+    let after = f.store.handle(&f.peer, Request::Dashboard {}).unwrap();
+    assert_eq!(after["budget"], before["budget"]);
+    // The cause can now be fixed and the delete requested again.
+    let again = f.store.handle(&f.peer, delete("third-delete")).unwrap();
+    assert_ne!(again["operation_id"], accepted["operation_id"]);
+}
+
+#[test]
+fn refusal_acknowledgment_is_limited_to_managed_lifecycle_and_delete() {
+    use hearth::control::vm_change::RecoveryKind;
+    let f = fixture(managed());
+    let accepted = f
+        .store
+        .handle(&f.peer, create("alex", "refused-create"))
+        .unwrap();
+    let id = accepted["operation_id"].as_str().unwrap();
+    f.store
+        .progress(
+            id,
+            OperationStatus::Blocked,
+            "preflight",
+            Some("refused".into()),
+        )
+        .unwrap();
+    let refused = f.store.queue_reviewed_recovery(
+        &f.peer,
+        "ack-create",
+        id,
+        &"a".repeat(64),
+        RecoveryKind::AcknowledgeRefusal,
+        true,
+    );
+    assert_eq!(refused.unwrap_err().code, "forbidden");
+}

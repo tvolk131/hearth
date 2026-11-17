@@ -222,22 +222,64 @@ struct MultiServerRoutingTests {
     #expect(await f.runner.pending(f.b.profilePath, "dashboard") == false)
     #expect(f.model.notices.contains { $0.serverId == f.a.id })
     #expect(!f.model.isRefreshing)
-    let count = await f.runner.invocations.count
-    f.model.retry(id)  // Selected B cannot retry A.
-    try await f.settle()
-    #expect(await f.runner.invocations.count == count)
     await f.runner.finish(f.a.profilePath, "dashboard", .success(dashboard("erin")))
     try await f.settle()
-    f.model.selectServer(f.a.id)
+    // Retry follows the entry's own server, not the selection: with B still
+    // selected, the same request goes to A and never to B.
+    #expect(f.model.selectedServerId == f.b.id)
     #expect(f.model.canRetry(try #require(f.model.ledger.entry(id))))
     f.model.retry(id)
     try await f.waitFor(f.a.profilePath, "mutation")
     let repeated = try #require(await f.runner.invocations.last)
     #expect(repeated.standardInput == invocation.standardInput)
+    #expect(repeated.arguments.contains(try #require(f.a.identity).serverId))
+    #expect(!repeated.arguments.contains(try #require(f.b.identity).serverId))
+    #expect(await f.runner.pending(f.b.profilePath, "mutation") == false)
+    #expect(f.model.selectedServerId == f.b.id)
     await f.runner.finish(f.a.profilePath, "mutation", .failure(.timedOut))
     try await f.waitFor(f.a.profilePath, "dashboard")
     await f.runner.finish(f.a.profilePath, "dashboard", .success(dashboard("erin")))
     try await f.settle()
+  }
+
+  @Test func recoveryFromAllServersOperationsGoesToTheOperationsOwnServer() async throws {
+    let f = try Fixture()
+    defer { f.clean() }
+    let capabilities = ["inspect_operation", "recover_operation"]
+    f.model.refresh()
+    try await f.waitFor(f.a.profilePath, "dashboard")
+    await f.runner.finish(
+      f.a.profilePath, "dashboard", .success(dashboard("erin", capabilities: capabilities)))
+    try await f.settle()
+    f.model.selectServer(f.b.id)
+    f.model.fleetPageActive = true
+    #expect(f.model.scopeServers(for: .users).map(\.id) == [f.a.id])
+    let originA = try #require(f.model.origin(forServer: f.a.id))
+    #expect(originA != f.model.requestOrigin)
+    let request = RpcRequest.recoverOperation(
+      RecoverOperationRequest(
+        requestId: UUID(), operationId: "refused", inspectionId: "proof",
+        kind: .acknowledgeRefusal, confirmRecovery: true))
+    let id = try #require(f.model.submit(request, origin: originA))
+    try await f.waitFor(f.a.profilePath, "mutation")
+    let invocation = try #require(await f.runner.invocations.last)
+    #expect(invocation.arguments.contains(try #require(f.a.identity).serverId))
+    #expect(!invocation.arguments.contains(try #require(f.b.identity).serverId))
+    #expect(await f.runner.pending(f.b.profilePath, "mutation") == false)
+    #expect(f.model.ledger.entry(id)?.serverId == f.a.id)
+    #expect(f.model.selectedServerId == f.b.id)
+    await f.runner.finish(
+      f.a.profilePath, "mutation",
+      .success(
+        response(
+          #"{"ok":true,"result":{"operation_id":"refused","owner":"erin","request_id":"r","kind":"delete","vm_id":9001,"status":"cancelled","step":"planned","error":"refused","created_at":1}}"#
+        )))
+    try await f.waitFor(f.a.profilePath, "dashboard")
+    await f.runner.finish(
+      f.a.profilePath, "dashboard", .success(dashboard("erin", capabilities: capabilities)))
+    try await f.settle()
+    #expect(f.model.ledger.entry(id) == nil)
+    #expect(f.model.notices.contains { $0.serverId == f.a.id })
   }
 
   @Test(arguments: ["identity", "profile", "executable"])

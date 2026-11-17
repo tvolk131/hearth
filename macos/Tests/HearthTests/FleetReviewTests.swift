@@ -25,7 +25,7 @@ struct FleetReviewTests {
       backend: .managed, capabilities: Array(DashboardResult.managedCapabilities),
       storageAllocations: [allocation])
   }
-  @Test func duplicateRecoveryRowsHaveScopedIdentityAndQualifiedDestructiveConfirmation() throws {
+  @Test func duplicateRecoveryRowsHaveScopedIdentityAndVmNameConfirmation() throws {
     let a = ServerProfile(name: "HDD", profilePath: "/a")
     let b = ServerProfile(name: "SSD", profilePath: "/b")
     let rows = FleetVm.build(
@@ -33,9 +33,93 @@ struct FleetReviewTests {
     #expect(rows.count == 2 && Set(rows.map(\.id)).count == 2)
     #expect(rows[0].serverId == a.id && rows[0].runningDuplicates == ["SSD"])
     #expect(rows[0].existing)
-    #expect(rows[0].confirmationRequired(for: .stop) == "HDD/dev-heidi")
-    #expect(rows[0].confirmationRequired(for: .delete) != "dev-heidi")
-    #expect(rows[0].confirmationRequired(for: .delete) != rows[1].qualifiedName)
+    // The sheet shows server, VM ID and owner; only the VM name is typed.
+    #expect(rows[0].confirmationRequired(for: .stop) == "dev-heidi")
+    #expect(rows[0].confirmationRequired(for: .delete) == "dev-heidi")
+    #expect(rows[0].confirmationRequired(for: .delete) != rows[0].qualifiedName)
+    #expect(rows[0].confirmationRequired(for: .shutdown) == nil)
+    #expect(rows[0].confirmationRequired(for: .start) == nil)
+    var fresh = rows[1]
+    fresh.existing = false
+    #expect(fresh.confirmationRequired(for: .stop) == nil)
+    #expect(fresh.confirmationRequired(for: .delete) == "dev-heidi")
+  }
+
+  private func operation(_ id: String, kind: String = "delete", status: String, createdAt: Int)
+    throws -> OperationRecord
+  {
+    let json =
+      #"{"operation_id":"\#(id)","owner":"erin","request_id":"r-\#(id)","kind":"\#(kind)","vm_id":103,"status":"\#(status)","step":"planned","error":null,"created_at":\#(createdAt)}"#
+    return try JSONDecoder().decode(OperationRecord.self, from: Data(json.utf8))
+  }
+
+  @Test func operationsListEveryControllerLabelledNewestFirstWithFilter() throws {
+    let a = ServerProfile(name: "HDD", profilePath: "/a")
+    let b = ServerProfile(name: "SSD", profilePath: "/b")
+    let host = ServerProfile(name: "Observed", profilePath: "/h", mode: .observation)
+    var da = dashboard(.stopped)
+    da.operations = [
+      try operation("a-old", status: "verified", createdAt: 10),
+      try operation("a-blocked", status: "blocked", createdAt: 30),
+    ]
+    var db = dashboard(.running)
+    db.operations = [
+      try operation("b-new", kind: "start", status: "blocked", createdAt: 40),
+      try operation("b-same-time", status: "running", createdAt: 30),
+    ]
+    var dh = dashboard(.running)
+    dh.operations = [try operation("host", status: "blocked", createdAt: 50)]
+    let dashboards = [a.id: da, b.id: db, host.id: dh]
+
+    let all = FleetOperation.build(
+      servers: [b, a, host], dashboards: dashboards, showCompleted: true)
+    #expect(all.map(\.operation.operationId) == ["b-new", "a-blocked", "b-same-time", "a-old"])
+    #expect(all.map(\.serverName) == ["SSD", "HDD", "SSD", "HDD"])
+    #expect(Set(all.map(\.id)).count == all.count)
+    #expect(all.first { $0.operation.operationId == "a-blocked" }?.serverId == a.id)
+
+    let active = FleetOperation.build(
+      servers: [a, b, host], dashboards: dashboards, showCompleted: false)
+    #expect(!active.contains { $0.operation.operationId == "a-old" })
+
+    let onlyA = FleetOperation.build(
+      servers: [a, b, host], dashboards: dashboards, serverFilter: a.id, showCompleted: true)
+    #expect(onlyA.map(\.operation.operationId) == ["a-blocked", "a-old"])
+    #expect(onlyA.allSatisfy { $0.serverId == a.id && $0.serverName == "HDD" })
+
+    // A read-only host is never listed, even when chosen as the filter.
+    #expect(
+      FleetOperation.build(
+        servers: [a, b, host], dashboards: dashboards, serverFilter: host.id, showCompleted: true
+      ).isEmpty)
+    // A server without a loaded dashboard contributes nothing.
+    #expect(
+      FleetOperation.build(servers: [a, b], dashboards: [b.id: db], showCompleted: true)
+        .allSatisfy { $0.serverId == b.id })
+  }
+
+  @Test func pendingFilterKeepsEveryEntryOrOnlyTheChosenServer() {
+    let identity = ServerIdentity(
+      serverId: String(repeating: "a", count: 64), environment: String(repeating: "b", count: 32),
+      deviceId: String(repeating: "c", count: 64))
+    let a = UUID()
+    let b = UUID()
+    var ledger = MutationLedger()
+    let first = ledger.prepare(
+      .vmAction(VmActionRequest(requestId: UUID(), vmId: 1, kind: .stop)), profilePath: "/a",
+      serverId: a, identity: identity)
+    let second = ledger.prepare(
+      .vmAction(VmActionRequest(requestId: UUID(), vmId: 2, kind: .stop)), profilePath: "/b",
+      serverId: b, identity: identity)
+    let legacy = ledger.prepare(
+      .vmAction(VmActionRequest(requestId: UUID(), vmId: 3, kind: .stop)), profilePath: "/old")
+    #expect(
+      PendingFilter.entries(ledger.entries, serverFilter: nil).map(\.id) == [
+        first.id, second.id, legacy.id,
+      ])
+    #expect(PendingFilter.entries(ledger.entries, serverFilter: a).map(\.id) == [first.id])
+    #expect(PendingFilter.entries(ledger.entries, serverFilter: b).map(\.id) == [second.id])
+    #expect(PendingFilter.entries(ledger.entries, serverFilter: UUID()).isEmpty)
   }
   @Test func startSkipsReviewOnlyWhenNoSameNamedCopyIsRunning() {
     let a = ServerProfile(name: "HDD", profilePath: "/a")

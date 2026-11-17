@@ -326,6 +326,8 @@ enum RecoveryChoice {
     AbortPreparation,
     #[value(alias = "acknowledge_failed_start")]
     AcknowledgeFailedStart,
+    #[value(alias = "acknowledge_refusal")]
+    AcknowledgeRefusal,
 }
 impl From<RecoveryChoice> for RecoveryKind {
     fn from(value: RecoveryChoice) -> Self {
@@ -333,6 +335,7 @@ impl From<RecoveryChoice> for RecoveryKind {
             RecoveryChoice::ResumeVerifiedEffect => Self::ResumeVerifiedEffect,
             RecoveryChoice::AbortPreparation => Self::AbortPreparation,
             RecoveryChoice::AcknowledgeFailedStart => Self::AcknowledgeFailedStart,
+            RecoveryChoice::AcknowledgeRefusal => Self::AcknowledgeRefusal,
         }
     }
 }

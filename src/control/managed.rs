@@ -356,7 +356,7 @@ impl ManagedBinding {
         let failed_start_recovery = job.kind == JobKind::RecoverOperation
             && job.vm.is_some()
             && matches!(job.extension.as_deref(), Some(super::vm_change::JobExtension::Recover(spec))
-                if spec.kind == super::vm_change::RecoveryKind::AcknowledgeFailedStart);
+                if matches!(spec.kind, super::vm_change::RecoveryKind::AcknowledgeFailedStart | super::vm_change::RecoveryKind::AcknowledgeRefusal));
         ensure!(
             (matches!(
                 job.kind,

@@ -38,7 +38,7 @@ struct StatusStrip: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
-      if model.isReadOnly {
+      if !global && model.isReadOnly {
         Label(
           "Read-only host observations. Refresh collects a new snapshot over pinned SSH. VM and account changes are unavailable.",
           systemImage: "eye"
@@ -61,7 +61,7 @@ struct StatusStrip: View {
       if !global, let id = model.selectedServerId {
         AutoRefreshPausedBanner(serverId: id)
       }
-      if !model.isReadOnly, let issue = model.ledgerStorageIssue {
+      if global || !model.isReadOnly, let issue = model.ledgerStorageIssue {
         FailureBox(
           title: "Pending request storage", detail: issue,
           systemImage: "externaldrive.badge.exclamationmark")

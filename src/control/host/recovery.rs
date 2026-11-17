@@ -31,6 +31,15 @@ impl Host {
         })
     }
     async fn recovery_probe(&self, context: &Context, quick: bool) -> Result<Value> {
+        if self.binding.managed.is_some()
+            && self
+                .journal()?
+                .jobs
+                .get(&context.operation_id)
+                .is_some_and(refused_before_effect)
+        {
+            return self.inspect_refusal(context).await;
+        }
         match context.kind {
             JobKind::Start if self.binding.managed.is_some() => {
                 self.inspect_failed_start(context).await
@@ -150,6 +159,55 @@ impl Host {
             "managed_identity_verified":true,"active_vm_tasks":false}),
         )
     }
+    /// Proves that a blocked managed operation never got past planning: no
+    /// step recorded an intent, task receipt, identity or witness, the machine
+    /// record is unchanged, and Proxmox runs no task for the VM.
+    async fn inspect_refusal(&self, context: &Context) -> Result<Value> {
+        ensure!(
+            self.binding.managed.is_some(),
+            "refusal acknowledgment requires a managed binding"
+        );
+        let journal = self.journal()?;
+        let original = journal
+            .jobs
+            .get(&context.operation_id)
+            .context("original operation missing")?;
+        ensure!(
+            refused_before_effect(original),
+            "operation recorded progress; it was not refused before every effect"
+        );
+        self.binding.validate_job(&original.job)?;
+        if let Some(machine) = journal.machines.get(&context.vm_id()) {
+            ensure!(
+                machine.state == MachineState::Present
+                    && machine.delete_operation.as_deref() != Some(context.operation_id.as_str()),
+                "machine record changed after the refusal"
+            );
+        }
+        let status = self
+            .backend
+            .api_get(&format!("{}/status/current", context.vm_path()), &[])
+            .await?;
+        let active = self
+            .backend
+            .api_get(
+                &format!("/nodes/{}/tasks", self.backend.node()),
+                &[
+                    ("source", "active".into()),
+                    ("vmid", context.vm_id().to_string()),
+                ],
+            )
+            .await?;
+        let vm_status =
+            verify_refusal_observations(self.backend.node(), context.vm_id(), &status, &active)?;
+        let refused_step = original.steps.first().map(|s| s.step.name()).unwrap_or("");
+        Ok(
+            json!({"classification":"refused_before_effect","acknowledge_refusal":true,
+            "candidate_phases":{},"verified_phases":{},"abort_candidate":false,
+            "refused_step":refused_step,"reason":original.error,"failure":original.failure,
+            "vm_status":vm_status,"active_vm_tasks":false}),
+        )
+    }
     pub(super) async fn inspect_operation(&self, id: &str) -> Result<Value> {
         let boot_id = self.check_host().await?;
         let journal = self.journal()?;
@@ -203,6 +261,9 @@ impl Host {
             if probe["acknowledge_failed_start"] == true {
                 allowed.push(RecoveryKind::AcknowledgeFailedStart);
             }
+            if probe["acknowledge_refusal"] == true {
+                allowed.push(RecoveryKind::AcknowledgeRefusal);
+            }
         }
         let machine = job
             .job
@@ -226,7 +287,7 @@ impl Host {
             "classification":probe["classification"].as_str().unwrap_or("full_verification_required"),
             "allowed_actions":allowed,"proof":probe,
             "evidence":[{"name":"durable_intent","status":if job.status==OperationStatus::Blocked{"blocked"}else{"observed"},"detail":format!("{} at {}; {} verified steps",job.job.kind,job.step,job.steps.iter().filter(|s|s.phase==Phase::Verified).count())},
-            {"name":"verification","status":"pending_full_verification","detail":if context.kind == JobKind::Start {"Acknowledge only this failed task after rechecking stopped state, no active VM task, and exact managed VM/storage identities. The VM stays stopped and its allocation remains held."} else {"A recovery job rechecks disk bytes, receipts and identities before accepting or aborting an effect."}}]}),
+            {"name":"verification","status":"pending_full_verification","detail":if probe["acknowledge_refusal"] == true {"Acknowledge only this refusal after rechecking that no step began, the machine record is unchanged and no native task runs for the VM. The VM keeps its state, data and allocation."} else if context.kind == JobKind::Start {"Acknowledge only this failed task after rechecking stopped state, no active VM task, and exact managed VM/storage identities. The VM stays stopped and its allocation remains held."} else {"A recovery job rechecks disk bytes, receipts and identities before accepting or aborting an effect."}}]}),
         )
     }
     pub(super) async fn run_recovery_step(
@@ -293,6 +354,21 @@ impl Host {
                 json!({"cancelled":true,"operation_id":spec.operation_id,"vm_stays_stopped":true,
                     "allocation_retained":true,"proof":fresh})
             }
+            RecoveryKind::AcknowledgeRefusal => {
+                ensure!(
+                    full["acknowledge_refusal"] == true,
+                    "full inspection does not prove a refusal before any effect"
+                );
+                // No external effect: recheck after the durable intent and
+                // commit the decision atomically with the cancellation.
+                let fresh = self.inspect_refusal(&target).await?;
+                ensure!(
+                    fresh == full,
+                    "refusal evidence changed before acknowledgment"
+                );
+                json!({"cancelled":true,"operation_id":spec.operation_id,"vm_unchanged":true,
+                    "allocation_retained":true,"proof":fresh})
+            }
             RecoveryKind::ResumeVerifiedEffect => {
                 let pending = original.steps.iter().find(|s| s.phase != Phase::Verified);
                 if pending.is_some_and(|pending| pending.phase == Phase::Intent) {
@@ -357,12 +433,13 @@ impl Host {
         self.update_step(context,step,|j,r|{
             let original=j.jobs.get_mut(&spec.operation_id).context("original operation missing")?;
             ensure!(original.status==OperationStatus::Blocked,"original operation changed during recovery");
-            if spec.kind != RecoveryKind::AcknowledgeFailedStart {original.error=None;}
+            if !matches!(spec.kind, RecoveryKind::AcknowledgeFailedStart | RecoveryKind::AcknowledgeRefusal) {original.error=None;}
             original.updated_at=Some(super::super::store::now());
             match spec.kind {
                 RecoveryKind::ResumeVerifiedEffect=>{original.status=OperationStatus::Queued;original.finished_at=None;}
                 RecoveryKind::AbortPreparation=>{original.status=OperationStatus::Cancelled;original.step="cancelled".into();original.finished_at=original.updated_at;if target.kind==JobKind::ShrinkVm {j.disk_shrinks.remove(&target.vm_id());}}
                 RecoveryKind::AcknowledgeFailedStart=>{original.status=OperationStatus::Cancelled;original.step="failed_start_acknowledged".into();original.finished_at=original.updated_at;}
+                RecoveryKind::AcknowledgeRefusal=>{original.status=OperationStatus::Cancelled;original.step="refusal_acknowledged".into();original.finished_at=original.updated_at;}
             }
             for (id,older) in &mut j.jobs {
                 if id!=&context.operation_id && !older.status.is_terminal() && matches!(older.job.extension.as_deref(),Some(JobExtension::Recover(s)) if s.operation_id==spec.operation_id) {
@@ -444,6 +521,60 @@ impl Host {
         }
         Ok(())
     }
+}
+
+/// A blocked start, shutdown, stop or delete whose steps never left planning:
+/// the helper refused it before recording any intent, task, identity or
+/// witness, so nothing it governs can have changed.
+pub(super) fn refused_before_effect(job: &HostJob) -> bool {
+    job.status == OperationStatus::Blocked
+        && matches!(
+            job.job.kind,
+            JobKind::Start | JobKind::Shutdown | JobKind::Stop | JobKind::Delete
+        )
+        && job.job.extension.is_none()
+        && job.job.vm.is_some()
+        && job.error.as_deref().is_some_and(|e| !e.is_empty())
+        && !job.steps.is_empty()
+        && job.steps.iter().all(|s| {
+            s.phase == Phase::Planned
+                && s.upid.is_none()
+                && s.identity.is_none()
+                && s.witness.is_none()
+        })
+}
+
+/// The VM exists under its VMID, is not locked, and has no active native task.
+/// Returns its current power state.
+fn verify_refusal_observations(
+    node: &str,
+    vm_id: u16,
+    status: &Value,
+    active: &Value,
+) -> Result<String> {
+    let state = status["status"].as_str().unwrap_or_default();
+    ensure!(
+        matches!(state, "running" | "stopped")
+            && status["vmid"].as_u64() == Some(u64::from(vm_id))
+            && status.get("lock").is_none_or(Value::is_null),
+        "VM is missing, locked, or in an unexpected state"
+    );
+    for task in active.as_array().context("active task list is unknown")? {
+        let receipt = task["upid"]
+            .as_str()
+            .context("active task has no receipt")?;
+        ensure!(
+            valid_upid_on(receipt, node),
+            "active task receipt is invalid"
+        );
+        let parts = receipt.split(':').collect::<Vec<_>>();
+        ensure!(parts.len() == 9, "active task receipt is malformed");
+        ensure!(
+            text(&task["id"]) != vm_id.to_string() && parts[6] != vm_id.to_string(),
+            "VM still has an active native task"
+        );
+    }
+    Ok(state.to_owned())
 }
 
 pub(super) fn failed_start_receipt(job: &HostJob, node: &str, vm_id: u16) -> Result<String> {
@@ -692,6 +823,73 @@ mod failed_start_tests {
             &json!([{"upid":UPID.replace("9201","103"),"id":"103"}]),
         )
         .unwrap();
+    }
+
+    fn refused_delete() -> HostJob {
+        let mut job = original();
+        job.job.kind = JobKind::Delete;
+        job.step = "verify".into();
+        job.error = Some("delete step verify: allocation retains snapshots/bookmarks".into());
+        job.steps = serde_json::from_value(json!([
+            {"step":"verify","phase":"planned","boot_id":null,"upid":null,"identity":null,"witness":null},
+            {"step":"stop","phase":"planned","boot_id":null,"upid":null,"identity":null,"witness":null},
+            {"step":"destroy","phase":"planned","boot_id":null,"upid":null,"identity":null,"witness":null}]))
+        .unwrap();
+        job
+    }
+
+    #[test]
+    fn only_jobs_refused_before_any_step_progressed_qualify() {
+        assert!(refused_before_effect(&refused_delete()));
+        // The failed start recorded a verified step and a task intent.
+        assert!(!refused_before_effect(&original()));
+        let mut verified = refused_delete();
+        verified.steps[0].phase = Phase::Verified;
+        assert!(!refused_before_effect(&verified));
+        let mut intent = refused_delete();
+        intent.steps[1].phase = Phase::Intent;
+        assert!(!refused_before_effect(&intent));
+        let mut receipt = refused_delete();
+        receipt.steps[0].upid = Some(UPID.into());
+        assert!(!refused_before_effect(&receipt));
+        let mut witness = refused_delete();
+        witness.steps[0].witness = Some(json!({}));
+        assert!(!refused_before_effect(&witness));
+        let mut running = refused_delete();
+        running.status = OperationStatus::Running;
+        assert!(!refused_before_effect(&running));
+        let mut silent = refused_delete();
+        silent.error = None;
+        assert!(!refused_before_effect(&silent));
+        let mut create = refused_delete();
+        create.job.kind = JobKind::Create;
+        assert!(!refused_before_effect(&create));
+        let mut unplanned = refused_delete();
+        unplanned.steps.clear();
+        assert!(!refused_before_effect(&unplanned));
+    }
+
+    #[test]
+    fn refusal_needs_an_existing_unlocked_vm_without_native_tasks() {
+        let check = |status: Value, active: Value| {
+            verify_refusal_observations("pve-lab", 9201, &status, &active)
+        };
+        assert_eq!(check(stopped(), json!([])).unwrap(), "stopped");
+        assert_eq!(
+            check(json!({"status":"running","vmid":9201}), json!([])).unwrap(),
+            "running"
+        );
+        assert!(check(json!({"status":"stopped","vmid":9202}), json!([])).is_err());
+        assert!(
+            check(
+                json!({"status":"stopped","vmid":9201,"lock":"backup"}),
+                json!([])
+            )
+            .is_err()
+        );
+        assert!(check(json!({"vmid":9201}), json!([])).is_err());
+        assert!(check(stopped(), json!(null)).is_err());
+        assert!(check(stopped(), json!([{"upid":UPID,"id":"9201"}])).is_err());
     }
 
     #[test]
