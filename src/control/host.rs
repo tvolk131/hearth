@@ -983,6 +983,16 @@ pub fn fingerprint(job: &Job) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+/// The fingerprint written by builds before [`fingerprint`] was versioned:
+/// SHA-256 of the job's JSON in struct field order, with no domain tag.
+///
+/// Deployed managed configs pin settled history (`settled_job_pins`) in this
+/// form. Those pins are root-approved and must keep matching, so they are the
+/// only place this is still accepted; nothing new is pinned this way.
+pub fn legacy_fingerprint(job: &Job) -> Result<String> {
+    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(job)?)))
+}
+
 fn profile(vm: &Vm) -> Profile {
     Profile {
         name: vm.name.clone(),
