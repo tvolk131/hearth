@@ -12,6 +12,8 @@ import HearthCore
 @MainActor
 @Observable
 final class AppModel {
+  /// True while a page that spans every server is showing (Servers, Virtual
+  /// Machines, Operations, Pending Requests): refresh and notices then cover all servers.
   var fleetPageActive = true
 
   @ObservationIgnored let registry: ServerRegistry
@@ -80,7 +82,12 @@ final class AppModel {
       && (selectedServer?.expectedBackend == nil
         || selectedServer?.expectedBackend == dashboard?.backend)
   }
-  var activeOperationCount: Int { dashboard?.operations.filter { $0.status.isActive }.count ?? 0 }
+  /// Active operations across every controller, for the Operations sidebar badge.
+  var activeOperationCount: Int {
+    fleetServers.reduce(0) {
+      $0 + (dashboard(forServer: $1.id)?.operations.filter { $0.status.isActive }.count ?? 0)
+    }
+  }
   func identityUser() -> User? { dashboard?.identity }
   var fleetVmCount: Int {
     sessions.values.reduce(0) {
@@ -119,6 +126,10 @@ final class AppModel {
   func cancelRefresh() { refresher.cancelRefresh() }
   func cancelAllRefreshes() { refresher.cancelAllRefreshes() }
   func setPolling(_ enabled: Bool) { refresher.setPolling(enabled) }
+  func setPolling(_ enabled: Bool, forServer id: UUID) {
+    refresher.setPolling(enabled, forServer: id)
+  }
+  func pollingEnabled(forServer id: UUID) -> Bool { sessions[id]?.pollingEnabled == true }
   func loadHost(on origin: MutationOrigin) async { await refresher.loadHost(on: origin) }
   func loadDashboard(on origin: MutationOrigin) async throws(RpcFailure) -> DashboardResult {
     try await refresher.loadDashboard(on: origin)
@@ -155,6 +166,7 @@ final class AppModel {
   var mutationSendStates: [UUID: RpcSendState] { mutations.mutationSendStates }
   var pendingForCurrentProfile: [PendingMutation] { mutations.pendingForCurrentProfile }
   var pendingForOtherProfiles: [PendingMutation] { mutations.pendingForOtherProfiles }
+  func isRoutable(_ entry: PendingMutation) -> Bool { mutations.isRoutable(entry) }
   var unresolvedCount: Int { mutations.unresolvedCount }
   @discardableResult
   func submit(_ request: RpcRequest, origin: MutationOrigin?) -> UUID? {

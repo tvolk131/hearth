@@ -11,8 +11,10 @@ struct FleetVm: Identifiable {
   var name: String { vm.name }
   var vmId: UInt16 { vm.vmId }
   var qualifiedName: String { "\(serverName)/\(vm.name)" }
+  /// The text to type before a destructive action. The review sheet already shows
+  /// the server, VM ID and owner, so only the VM name is required.
   func confirmationRequired(for kind: VmActionKind) -> String? {
-    kind == .delete || (kind == .stop && existing) ? qualifiedName : nil
+    kind == .delete || (kind == .stop && existing) ? vm.name : nil
   }
   /// Start is the only action sent straight from the menu, and only while no
   /// same-named VM is running elsewhere: two copies would serve the same things.
@@ -42,7 +44,48 @@ struct FleetVm: Identifiable {
   }
 }
 
+/// One operation from one controller's dashboard, labelled with its server.
+struct FleetOperation: Identifiable {
+  let serverId: UUID
+  let serverName: String
+  let operation: OperationRecord
+  var id: String { "\(serverId)/\(operation.operationId)" }
+
+  /// Operations from every controller (or only `serverFilter`), newest first.
+  /// Completed operations are left out unless `showCompleted` is set.
+  static func build(
+    servers: [ServerProfile], dashboards: [UUID: DashboardResult], serverFilter: UUID? = nil,
+    showCompleted: Bool
+  ) -> [FleetOperation] {
+    servers.filter { !$0.isReadOnly && (serverFilter == nil || $0.id == serverFilter) }
+      .flatMap { server in
+        (dashboards[server.id]?.operations ?? [])
+          .filter { showCompleted || $0.status != .verified }
+          .map { FleetOperation(serverId: server.id, serverName: server.name, operation: $0) }
+      }
+      .sorted {
+        ($0.operation.createdAt, $1.serverName, $1.operation.operationId)
+          > ($1.operation.createdAt, $0.serverName, $0.operation.operationId)
+      }
+  }
+}
+
+/// Which pending requests a server filter shows: every entry for "All servers",
+/// otherwise only entries recorded for that server.
+enum PendingFilter {
+  static func entries(_ entries: [PendingMutation], serverFilter: UUID?) -> [PendingMutation] {
+    guard let serverFilter else { return entries }
+    return entries.filter { $0.serverId == serverFilter }
+  }
+}
+
 extension AppModel {
+  /// Each controller's last dashboard, keyed by server.
+  var fleetDashboards: [UUID: DashboardResult] {
+    fleetServers.reduce(into: [:]) { result, server in
+      result[server.id] = dashboard(forServer: server.id)
+    }
+  }
   var fleetRows: [FleetVm] {
     FleetVm.build(
       servers: settings.servers,

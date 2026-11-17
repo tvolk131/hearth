@@ -329,7 +329,7 @@ impl AdoptedVm {
         expected.state = vm.state.clone();
         let recovery = job.kind == JobKind::RecoverOperation
             && matches!(job.extension.as_deref(), Some(super::vm_change::JobExtension::Recover(spec))
-                if spec.kind == super::vm_change::RecoveryKind::AcknowledgeFailedStart
+                if matches!(spec.kind, super::vm_change::RecoveryKind::AcknowledgeFailedStart | super::vm_change::RecoveryKind::AcknowledgeRefusal)
                     && host::valid_operation_id(&spec.operation_id) && host::valid_operation_id(&spec.inspection_id));
         ensure!(
             (matches!(

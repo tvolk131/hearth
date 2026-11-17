@@ -157,6 +157,14 @@ extension DashboardResult {
                   vms.contains(where: { $0.vmId == vmId && $0.owner == operation.owner }) else { return false }
             return Permissions(identity: identity).isAdmin
         }
+        /// Any operation this controller lists, for an administrator. A refusal before
+        /// any effect can be acknowledged whatever the operation's kind; the server
+        /// decides whether the operation really is one.
+        func isManagedOperation(_ operationId: String) -> Bool {
+            guard let operation = operations.first(where: { $0.operationId == operationId }) else { return false }
+            if let vmId = operation.vmId, importedVms.contains(where: { $0.vm.vmId == vmId }) { return false }
+            return Permissions(identity: identity).isAdmin
+        }
         let capability: String
         switch request {
         case .hostInventory: capability = "host_inventory"
@@ -173,11 +181,17 @@ extension DashboardResult {
         case .updateUserPolicy: capability = "update_user_policy"
         case .deleteUser: capability = "delete_user"
         case .inspectOperation(let operationId):
-            guard isManagedStart(operationId) else { return "Only an administrator can inspect a start attempt for a managed VM." }
+            guard isManagedOperation(operationId) else { return "Only an administrator can inspect an operation listed by this managed controller." }
             capability = "inspect_operation"
         case .recoverOperation(let value):
-            guard value.kind == .acknowledgeFailedStart, isManagedStart(value.operationId) else {
-                return "Only acknowledgment of a proven failed managed start is available on this controller."
+            let admitted: Bool
+            switch value.kind {
+            case .acknowledgeFailedStart: admitted = isManagedStart(value.operationId)
+            case .acknowledgeRefusal: admitted = isManagedOperation(value.operationId)
+            case .resumeVerifiedEffect, .abortPreparation: admitted = false
+            }
+            guard admitted else {
+                return "Only acknowledgment of a proven failed managed start, or of a refusal before any change, is available on this controller."
             }
             capability = "recover_operation"
         default: return "This action is unavailable on the managed controller."

@@ -1,6 +1,9 @@
 import HearthCore
 import SwiftUI
 
+/// A blocked operation and the route of the server that listed it. Inspection
+/// and recovery go only to that server, whichever server is selected elsewhere,
+/// and stop as soon as that server's profile or identity changes.
 struct OperationInspectionTarget: Identifiable {
   let id = UUID()
   let operation: OperationRecord
@@ -16,6 +19,20 @@ struct OperationInspectionSheet: View {
   @State private var isLoading = false
   @State private var confirmed = false
 
+  /// The operation's own server still has the route this sheet was opened with.
+  private var routeIsCurrent: Bool {
+    guard let origin = target.origin else { return false }
+    return origin == model.origin(forServer: origin.serverId)
+  }
+  private var dashboard: DashboardResult? {
+    target.origin.flatMap { model.dashboard(forServer: $0.serverId) }
+  }
+  private var canRecover: Bool {
+    guard routeIsCurrent, let origin = target.origin else { return false }
+    return model.isAdmin(onServer: origin.serverId)
+      && dashboard?.supports("recover_operation") == true
+  }
+
   var body: some View {
     VStack(alignment: .leading, spacing: 14) {
       Text("Inspect operation on \(model.serverName(on: target.origin))").font(
@@ -24,7 +41,7 @@ struct OperationInspectionSheet: View {
       Text(SafeText.sanitize(target.operation.operationId, limit: 64))
         .font(.caption.monospaced()).textSelection(.enabled)
       if let inspection {
-        Text(SafeText.sanitize(inspection.classification, limit: 160)).fontWeight(.medium)
+        Text(OperationPresentation.classification(inspection.classification)).fontWeight(.medium)
         ScrollView {
           VStack(alignment: .leading, spacing: 12) {
             ForEach(Array(inspection.evidence.prefix(128).enumerated()), id: \.offset) {
@@ -63,10 +80,7 @@ struct OperationInspectionSheet: View {
                   dismiss()
                 }
               }
-              .disabled(
-                !confirmed || isLoading || target.origin != model.requestOrigin
-                  || !model.permissions.isAdmin || model.isReadOnly
-                  || model.dashboard?.supports("recover_operation") != true)
+              .disabled(!confirmed || isLoading || !canRecover)
             }
           }
         }
@@ -81,8 +95,7 @@ struct OperationInspectionSheet: View {
           Text("Inspecting actual server state…").foregroundStyle(.secondary)
         }
         Spacer()
-        Button("Inspect Again") { Task { await load() } }.disabled(
-          isLoading || target.origin != model.requestOrigin)
+        Button("Inspect Again") { Task { await load() } }.disabled(isLoading || !routeIsCurrent)
         Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
       }
     }
@@ -99,9 +112,15 @@ struct OperationInspectionSheet: View {
     confirmed = false
     defer { isLoading = false }
     do throws(RpcFailure) {
-      let value = try await model.query(
+      guard let origin = target.origin, routeIsCurrent else {
+        throw .configuration(
+          "The operation's server or its profile changed. Open this operation again from Operations.")
+      }
+      // Bound to the operation's own server route; a reply after that route
+      // changes is discarded by the route check.
+      let value = try await model.queryOnRoute(
         .inspectOperation(operationId: target.operation.operationId),
-        origin: target.origin, as: OperationInspection.self)
+        origin: origin, as: OperationInspection.self)
       guard value.operation.operationId == target.operation.operationId else {
         throw .malformedResponse("The inspection belongs to another operation.")
       }

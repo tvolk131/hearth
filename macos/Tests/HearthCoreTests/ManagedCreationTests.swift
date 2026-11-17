@@ -128,6 +128,34 @@ struct ManagedCreationTests {
         d.identity.role = .admin; d.capabilities.removeAll { $0 == "recover_operation" }
         #expect(d.requestIssue(acknowledge, catalog: nil) != nil)
     }
+    @Test func refusalAcknowledgmentIsAdmittedForAnyManagedOperationKind() throws {
+        var d = managedDashboard()
+        d.vms = [Vm(vmId: 9201, owner: "setup-check", name: "fresh", diskMib: 4096, memoryMib: 1024, minMemoryMib: 512, cores: 1, state: .stopped)]
+        for kind in ["delete", "start", "stop", "shutdown", "create_guest"] {
+            let json = #"{"operation_id":"refused-\#(kind)","owner":"setup-check","request_id":"r","kind":"\#(kind)","vm_id":9201,"status":"blocked","step":"planned","error":"refused by helper","created_at":1}"#
+            d.operations = [try JSONDecoder().decode(OperationRecord.self, from: Data(json.utf8))]
+            let operationId = "refused-\(kind)"
+            let acknowledge = RpcRequest.recoverOperation(RecoverOperationRequest(requestId: UUID(), operationId: operationId, inspectionId: "review", kind: .acknowledgeRefusal, confirmRecovery: true))
+            #expect(d.requestIssue(.inspectOperation(operationId: operationId), catalog: nil) == nil)
+            #expect(d.requestIssue(acknowledge, catalog: nil) == nil)
+            // The start-only acknowledgment stays bound to start operations.
+            let failedStart = RpcRequest.recoverOperation(RecoverOperationRequest(requestId: UUID(), operationId: operationId, inspectionId: "review", kind: .acknowledgeFailedStart, confirmRecovery: true))
+            #expect((d.requestIssue(failedStart, catalog: nil) == nil) == (kind == "start"))
+            // Other recovery kinds remain unavailable on a managed controller.
+            for other in [RecoveryAction.resumeVerifiedEffect, .abortPreparation] {
+                #expect(d.requestIssue(.recoverOperation(RecoverOperationRequest(requestId: UUID(), operationId: operationId, inspectionId: "review", kind: other, confirmRecovery: true)), catalog: nil) != nil)
+            }
+        }
+        let refused = RpcRequest.recoverOperation(RecoverOperationRequest(requestId: UUID(), operationId: "refused-delete", inspectionId: "review", kind: .acknowledgeRefusal, confirmRecovery: true))
+        let json = #"{"operation_id":"refused-delete","owner":"setup-check","request_id":"r","kind":"delete","vm_id":9201,"status":"blocked","step":"planned","error":"refused","created_at":1}"#
+        d.operations = [try JSONDecoder().decode(OperationRecord.self, from: Data(json.utf8))]
+        #expect(d.requestIssue(.recoverOperation(RecoverOperationRequest(requestId: UUID(), operationId: "unknown", inspectionId: "review", kind: .acknowledgeRefusal, confirmRecovery: true)), catalog: nil) != nil)
+        d.identity.role = .member
+        #expect(d.requestIssue(refused, catalog: nil) != nil)
+        #expect(d.requestIssue(.inspectOperation(operationId: "refused-delete"), catalog: nil) != nil)
+        d.identity.role = .admin; d.capabilities.removeAll { $0 == "recover_operation" }
+        #expect(d.requestIssue(refused, catalog: nil) != nil)
+    }
     @Test func importedRowsStaySeparateUnchargedAndNeverAcquireActions() throws {
         let vm = Vm(vmId: 103, owner: "heidi", name: "HDD recovery", diskMib: 262144, memoryMib: 32768, minMemoryMib: 12288, cores: 8, state: .stopped)
         let row = ImportedVm(vm: vm, label: "Stopped HDD recovery", observedAt: 1794500000, configurationSha256: digest, reason: "Imported without changing guest/config/storage; legacy mutation not qualified")

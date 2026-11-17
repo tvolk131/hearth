@@ -235,7 +235,7 @@ struct FleetVirtualMachinesView: View {
                 Label(maintenanceTitle(kind), systemImage: maintenanceIcon(kind))
               }
               .help(
-                "Opens on \(row.serverName). Operations and Pending Requests then show that server.")
+                "Opens on \(row.serverName).")
             }
           }
         }.fixedSize()

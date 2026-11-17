@@ -1,83 +1,62 @@
 import HearthCore
 import SwiftUI
 
+/// Every pending request from every server, labelled by server and filtered in
+/// the page. Retry always goes to the request's own server.
 struct PendingRequestsView: View {
   @Environment(AppModel.self) private var model
+  @State private var serverFilter: UUID?
   @State private var discardTarget: PendingMutation?
-  @State private var loadingImages = false
-  @State private var imageStatus: String?
+  @State private var loadingImages: Set<UUID> = []
+  @State private var imageStatus: [UUID: String] = [:]
+
+  private var entries: [PendingMutation] {
+    PendingFilter.entries(model.ledger.entries, serverFilter: serverFilter)
+  }
+  /// Managed controllers whose shown entries include a retryable create.
+  private var serversNeedingImages: [ServerProfile] {
+    model.fleetServers.filter { server in
+      model.dashboard(forServer: server.id)?.backend == .managed
+        && entries.contains {
+          guard $0.serverId == server.id, model.isRoutable($0) else { return false }
+          if case .createVm = $0.request { return $0.canRetry }
+          return false
+        }
+    }
+  }
 
   var body: some View {
-    Group {
-      if model.pendingForCurrentProfile.isEmpty && model.pendingForOtherProfiles.isEmpty {
+    VStack(alignment: .leading, spacing: 12) {
+      HStack {
+        ServerFilterPicker(selection: $serverFilter)
+        Spacer()
+        Text("\(entries.count) pending request\(entries.count == 1 ? "" : "s")")
+          .foregroundStyle(.secondary)
+      }.padding(.horizontal, 20)
+      if entries.isEmpty {
         ContentUnavailableView(
           "No pending requests", systemImage: "tray",
-          description: Text("Every submitted change has been acknowledged.")
+          description: Text(
+            serverFilter == nil || model.ledger.entries.isEmpty
+              ? "Every submitted change has been acknowledged."
+              : "Other servers still have pending requests. Choose All servers to see them.")
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
         ScrollView {
           VStack(alignment: .leading, spacing: 16) {
             Text(
-              "Change requests stay here until the server acknowledges them. Retrying reuses the original request ID, so the server can recognise a repeat instead of allocating twice. Nothing here is resent automatically, including after relaunch."
+              "Change requests stay here until the server acknowledges them. Retrying reuses the original request ID and sends to the request's own server, so it can recognise a repeat instead of allocating twice. Nothing here is resent automatically, including after relaunch."
             )
             .font(.callout)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
 
-            let current = model.pendingForCurrentProfile
-            if model.dashboard?.backend == .managed
-              && current.contains(where: {
-                if case .createVm = $0.request { return $0.canRetry }
-                return false
-              })
-            {
-              VStack(alignment: .leading, spacing: 6) {
-                Text(
-                  "Validate this controller’s approved images before retrying a pending create after relaunch. The saved image, key, owner and request ID stay the same."
-                )
-                .font(.callout).foregroundStyle(.secondary)
-                Button(loadingImages ? "Loading Images…" : "Validate Images for Pending Creates") {
-                  let origin = model.requestOrigin
-                  loadingImages = true
-                  imageStatus = nil
-                  Task {
-                    defer { loadingImages = false }
-                    do {
-                      let catalog = try await model.loadImageCatalog(origin: origin)
-                      imageStatus =
-                        catalog.images.isEmpty
-                        ? "No approved images are available; pending creates remain paused."
-                        : "Approved images loaded. Requests using an available image can be retried."
-                    } catch let failure as RpcFailure { imageStatus = failure.detail } catch {
-                      imageStatus = "The approved image catalog could not be loaded."
-                    }
-                  }
-                }.disabled(loadingImages)
-                if let imageStatus { Text(imageStatus).font(.caption).foregroundStyle(.secondary) }
-              }
+            ForEach(serversNeedingImages) { server in
+              imageValidation(server)
             }
-            if current.isEmpty {
-              // Only reached when other servers still have pending requests.
-              ContentUnavailableView(
-                "No pending requests for this server", systemImage: "tray",
-                description: Text("Other servers still have pending requests, listed below.")
-              )
-              .frame(maxWidth: .infinity)
-            } else {
-              ForEach(current) { entry in
-                PendingRow(
-                  entry: entry, isCurrentProfile: true, onDiscard: { discardTarget = entry })
-              }
-            }
-
-            let others = model.pendingForOtherProfiles
-            if !others.isEmpty {
-              Text("Other servers and older requests").font(.headline).padding(.top, 8)
-              ForEach(others) { entry in
-                PendingRow(
-                  entry: entry, isCurrentProfile: false, onDiscard: { discardTarget = entry })
-              }
+            ForEach(entries) { entry in
+              PendingRow(entry: entry, onDiscard: { discardTarget = entry })
             }
           }
           .frame(maxWidth: .infinity, alignment: .leading)
@@ -86,7 +65,11 @@ struct PendingRequestsView: View {
         }
       }
     }
+    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     .navigationTitle("Pending Requests")
+    .onChange(of: model.fleetServers.map(\.id)) { _, ids in
+      if let filter = serverFilter, !ids.contains(filter) { serverFilter = nil }
+    }
     .confirmationDialog(
       "Discard this pending request?",
       isPresented: Binding(get: { discardTarget != nil }, set: { if !$0 { discardTarget = nil } }),
@@ -103,17 +86,49 @@ struct PendingRequestsView: View {
       )
     }
   }
+
+  private func imageValidation(_ server: ServerProfile) -> some View {
+    let loading = loadingImages.contains(server.id)
+    return VStack(alignment: .leading, spacing: 6) {
+      Text(
+        "Validate \(server.name)'s approved images before retrying a pending create after relaunch. The saved image, key, owner and request ID stay the same."
+      )
+      .font(.callout).foregroundStyle(.secondary)
+      Button(loading ? "Loading Images…" : "Validate Images on \(server.name)") {
+        let origin = model.origin(forServer: server.id)
+        loadingImages.insert(server.id)
+        imageStatus[server.id] = nil
+        Task {
+          defer { loadingImages.remove(server.id) }
+          do {
+            let catalog = try await model.loadImageCatalog(origin: origin)
+            imageStatus[server.id] =
+              catalog.images.isEmpty
+              ? "No approved images are available; pending creates remain paused."
+              : "Approved images loaded. Requests using an available image can be retried."
+          } catch let failure as RpcFailure { imageStatus[server.id] = failure.detail } catch {
+            imageStatus[server.id] = "The approved image catalog could not be loaded."
+          }
+        }
+      }.disabled(loading)
+      if let status = imageStatus[server.id] {
+        Text(status).font(.caption).foregroundStyle(.secondary)
+      }
+    }
+  }
 }
 
 struct PendingRow: View {
   @Environment(AppModel.self) private var model
   let entry: PendingMutation
-  let isCurrentProfile: Bool
   let onDiscard: () -> Void
 
   var body: some View {
     GroupBox {
       VStack(alignment: .leading, spacing: 8) {
+        Label(model.serverName(for: entry), systemImage: "server.rack")
+          .font(.caption.weight(.medium))
+          .foregroundStyle(.secondary)
         HStack(alignment: .firstTextBaseline) {
           Text(entry.request.summary).font(.headline)
           if entry.request.isDestructive {
@@ -135,8 +150,8 @@ struct PendingRow: View {
         )
         .font(.caption)
         .foregroundStyle(.secondary)
-        if !isCurrentProfile {
-          Text("\(model.serverName(for: entry)) · Profile: \(entry.profilePath)")
+        if !model.isRoutable(entry) {
+          Text("Profile: \(entry.profilePath)")
             .font(.caption)
             .foregroundStyle(.secondary)
         }
@@ -173,7 +188,7 @@ struct PendingRow: View {
                 .disabled(!model.canRetry(entry))
                 .help(
                   model.retryIssue(entry)
-                    ?? "Resend exactly the same request to its original server and device")
+                    ?? "Resend exactly the same request to \(model.serverName(for: entry)) with its original device")
             }
           }
         }

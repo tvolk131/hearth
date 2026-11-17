@@ -253,12 +253,34 @@ struct ObservationRoutingTests {
     let before = try Data(contentsOf: ledgerPath)
     let previousCalls = await f.runner.calls.count
     f.model.selectServer(f.a.id)
-    #expect(!f.model.canRetry(pending))
-    f.model.retry(pendingId)
-    let calls = await f.runner.calls.count
-    #expect(calls == previousCalls)
-    #expect(try Data(contentsOf: ledgerPath) == before)
-    #expect(f.model.ledger.entry(pendingId)?.serverId == f.controller.id)
     #expect(f.model.pendingForCurrentProfile.isEmpty)
+    // Retry follows the entry's own controller, never the selected read-only host.
+    f.model.retry(pendingId)
+    for _ in 0..<200 {
+      if !f.model.isMutationInFlight(pendingId) { break }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    try await f.settleRefresh()
+    let retried = await f.runner.calls.dropFirst(previousCalls)
+    #expect(!retried.isEmpty)
+    for call in retried {
+      #expect(call.arguments.first != "observe")
+      #expect(call.arguments.contains { $0.hasSuffix("/controller.json") })
+      #expect(!call.arguments.contains { $0.hasSuffix("/a.json") })
+    }
+    #expect(f.model.ledger.entry(pendingId)?.serverId == f.controller.id)
+    #expect(try Data(contentsOf: ledgerPath) != before)
+
+    // A controller that becomes a read-only host can no longer receive it.
+    var changed = f.model.settings
+    let index = try #require(changed.servers.firstIndex { $0.id == f.controller.id })
+    changed.servers[index].mode = .observation
+    f.model.applySettings(changed)
+    let entry = try #require(f.model.ledger.entry(pendingId))
+    #expect(!f.model.canRetry(entry))
+    let count = await f.runner.calls.count
+    f.model.retry(pendingId)
+    try await Task.sleep(for: .milliseconds(25))
+    #expect(await f.runner.calls.count == count)
   }
 }

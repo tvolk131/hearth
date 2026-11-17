@@ -187,9 +187,10 @@ final class MutationCoordinator {
   {
     let background = delivery == .background
     guard !ledgerLoadFailed, let entry = ledger.entry(id) else { throw .silent }
-    // Manual retries still require selecting the original route; new forms
-    // pass their reviewed origin and need not alter the sidebar selection.
-    guard let origin = origin ?? (isCurrent(entry) ? registry.requestOrigin : nil),
+    // A manual retry goes only to the entry's own server, and only while that
+    // server keeps the profile path and identity the request was recorded with.
+    // New forms pass their reviewed origin. Neither depends on the selected server.
+    guard let origin = origin ?? routableOrigin(entry),
       let server = registry.server(origin.serverId),
       let identity = server.identity,
       registry.sessions[server.id] != nil
@@ -373,10 +374,6 @@ final class MutationCoordinator {
 
   // MARK: Pending requests
 
-  private var selectedPermissions: Permissions {
-    Permissions(identity: registry.isReadOnly ? nil : registry.selectedSession.dashboard?.identity)
-  }
-
   var pendingForCurrentProfile: [PendingMutation] { ledger.entries.filter(isCurrent) }
   var pendingForOtherProfiles: [PendingMutation] { ledger.entries.filter { !isCurrent($0) } }
   var unresolvedCount: Int { ledger.entries.filter { $0.phase != .rejected }.count }
@@ -391,17 +388,23 @@ final class MutationCoordinator {
       if entry.isInFlight { return "This request is already in progress." }
       return "This request has no saved server identity, so it cannot be retried safely."
     }
-    guard isCurrent(entry) else {
-      return "Select \(serverName(for: entry)) in the sidebar, with its original profile, to retry."
+    guard let server = registry.server(entry.serverId) else {
+      return "Its server was removed from Settings. Verify the outcome there before discarding it."
     }
-    guard registry.isConfigured else {
-      return registry.configurationIssues.first ?? "Finish configuring this server in Settings."
+    guard isRoutable(entry) else {
+      return server.isReadOnly
+        ? "\(server.name) is now a read-only host and cannot receive this request."
+        : "\(server.name) now uses a different profile or identity. Restore its original profile to retry."
     }
-    if let issue = routes.routeIssue(entry.request, serverId: registry.selectedServerId) {
-      return issue
+    guard server.isTrusted else {
+      return "Inspect and trust \(server.name)'s profile in Settings before retrying."
     }
-    if entry.request.requiresAdministrator && !selectedPermissions.canManageUsers {
-      return "Administrator access on this server is required. Refresh its dashboard."
+    do { _ = try registry.configuration(for: server.id) } catch { return error.detail }
+    if let issue = routes.routeIssue(entry.request, serverId: server.id) { return issue }
+    if entry.request.requiresAdministrator
+      && !Permissions(identity: registry.sessions[server.id]?.dashboard?.identity).canManageUsers
+    {
+      return "Administrator access on \(server.name) is required. Refresh its dashboard."
     }
     return nil
   }
@@ -441,6 +444,20 @@ final class MutationCoordinator {
   func serverName(for entry: PendingMutation) -> String {
     registry.server(entry.serverId)?.name
       ?? (entry.hasServerBinding ? "Removed server" : "Legacy request (identity unknown)")
+  }
+
+  /// Whether the entry's own server still has the profile path and identity the
+  /// request was recorded with, so a retry reaches exactly that server.
+  func isRoutable(_ entry: PendingMutation) -> Bool {
+    guard entry.hasServerBinding, let server = registry.server(entry.serverId), !server.isReadOnly,
+      server.identity != nil
+    else { return false }
+    return entry.identity == server.identity && entry.profilePath == server.canonicalProfilePath
+  }
+
+  private func routableOrigin(_ entry: PendingMutation) -> MutationOrigin? {
+    guard isRoutable(entry), let serverId = entry.serverId else { return nil }
+    return registry.origin(forServer: serverId)
   }
 
   private func isCurrent(_ entry: PendingMutation) -> Bool {

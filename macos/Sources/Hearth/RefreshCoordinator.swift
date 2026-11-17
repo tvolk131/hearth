@@ -280,9 +280,15 @@ final class RefreshCoordinator: ServerSessionLifecycle {
   // MARK: Polling
 
   func setPolling(_ enabled: Bool) {
-    guard let id = registry.selectedServerId, let session = sessions[id] else { return }
+    guard let id = registry.selectedServerId else { return }
+    setPolling(enabled, forServer: id)
+  }
+
+  /// Auto-refresh is chosen per server; it never depends on which page is showing.
+  func setPolling(_ enabled: Bool, forServer id: UUID) {
+    guard let session = sessions[id] else { return }
     session.pollingEnabled = enabled
-    registry.setSelectedPollingFlag(enabled)
+    if id == registry.selectedServerId { registry.setSelectedPollingFlag(enabled) }
     if enabled { restartPolling(id) } else { pollingTasks.removeValue(forKey: id)?.cancel() }
   }
 
