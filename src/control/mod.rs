@@ -18,3 +18,15 @@ pub mod transport;
 pub mod vm_change;
 
 pub use job_kind::JobKind;
+
+/// Sends library diagnostics (iroh's connection and path logs) to stderr,
+/// only when `RUST_LOG` is set, e.g. `RUST_LOG=iroh=debug`.
+pub fn init_diagnostic_logging() {
+    if std::env::var_os("RUST_LOG").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .try_init();
+    }
+}
