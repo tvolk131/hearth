@@ -337,9 +337,12 @@ impl ManagedBinding {
     }
     pub fn validate_retained_job(&self, job: &Job, terminal: bool) -> Result<()> {
         if terminal
-            && self
+            && (self
                 .settled_job_pins
                 .contains(&super::host::fingerprint(job)?)
+                || self
+                    .settled_job_pins
+                    .contains(&super::host::legacy_fingerprint(job)?))
         {
             return Ok(());
         }

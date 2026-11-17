@@ -1699,6 +1699,14 @@ mod managed_backup_tests {
         let mut tampered = op.job.clone();
         tampered.vm.as_mut().unwrap().cores += 1;
         assert!(binding.validate_retained_job(&tampered, true).is_err());
+        // Pins written by builds before fingerprints were versioned still
+        // settle the same history, and only that history.
+        let mut legacy = binding.clone();
+        legacy.settled_job_pins =
+            std::collections::BTreeSet::from([host::legacy_fingerprint(&op.job).unwrap()]);
+        legacy.validate_retained_job(&op.job, true).unwrap();
+        assert!(legacy.validate_retained_job(&op.job, false).is_err());
+        assert!(legacy.validate_retained_job(&tampered, true).is_err());
         for case in 0..4 {
             let mut bad = next.clone();
             match case {
