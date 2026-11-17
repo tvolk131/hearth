@@ -888,9 +888,8 @@ impl Store {
         Ok(store)
     }
 
-    /// Opens an existing catalog. A format-1 (single-row) database is
-    /// validated as it is, then migrated in one atomic transaction; a database
-    /// from a newer format, or with fields this build would drop, is refused.
+    /// Opens an existing catalog. A database in retired format 1, in a newer
+    /// format, or with fields this build would drop, is refused.
     pub fn open(path: &Path, binding: &Binding) -> Result<Self> {
         binding.validate()?;
         let store = Self {
@@ -902,7 +901,6 @@ impl Store {
             matches!(catalog.schema, 1..=7) && &catalog.binding == binding,
             "database environment identity or policy changed; investigate rather than reset"
         );
-        super::persist::migrate_catalog(&store.database)?;
         super::persist::verify_catalog(&store.database)?;
         Ok(store)
     }

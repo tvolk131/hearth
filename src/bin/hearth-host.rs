@@ -2,9 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Result, ensure};
 use clap::{Parser, Subcommand};
-use hearth::control::host::{
-    Host, HostConfig, HostRequest, SHUTDOWN_GRACE, repair_managed_schema, rpc, serve_until,
-};
+use hearth::control::host::{Host, HostConfig, HostRequest, SHUTDOWN_GRACE, rpc, serve_until};
 use tokio::signal::unix::{SignalKind, signal};
 
 #[derive(Parser)]
@@ -19,20 +17,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Offline marker-only repair of the narrowly identified managed6 submission bug.
-    RepairManagedSchema {
-        #[arg(long)]
-        state_dir: PathBuf,
-        #[arg(long)]
-        managed_config: PathBuf,
-        #[arg(long)]
-        expected_journal_sha256: String,
-        #[arg(long)]
-        backup_directory: PathBuf,
-        /// Validate native redb crash recovery in memory before allowing it on the pinned original.
-        #[arg(long)]
-        allow_native_recovery: bool,
-    },
     Serve {
         #[arg(long)]
         state_dir: PathBuf,
@@ -64,23 +48,6 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
-        Command::RepairManagedSchema {
-            state_dir,
-            managed_config,
-            expected_journal_sha256,
-            backup_directory,
-            allow_native_recovery,
-        } => {
-            let receipt = repair_managed_schema(
-                &state_dir,
-                &managed_config,
-                &expected_journal_sha256,
-                &backup_directory,
-                allow_native_recovery,
-            )?;
-            println!("{}", serde_json::to_string(&receipt)?);
-            Ok(())
-        }
         Command::Serve {
             state_dir,
             socket,

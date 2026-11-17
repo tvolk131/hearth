@@ -14,7 +14,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
-use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::Database;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -32,7 +32,6 @@ mod grow;
 mod managed;
 mod migration;
 mod recovery;
-mod schema_repair;
 mod shrink;
 mod worker;
 
@@ -42,7 +41,6 @@ pub use error_policy::{
     ClassifiedError, ErrorClass, RETRY_BUDGET, RETRY_INITIAL_DELAY, RETRY_MAX_DELAY, RetryPolicy,
     RetryState, SHUTDOWN_GRACE, ShuttingDown, ambiguous, class_of, permanent, retryable,
 };
-pub use schema_repair::{ManagedSchemaRepairReceipt, repair_managed_schema};
 
 use super::{
     managed::{ManagedBinding, ManagedConfig, Namespace},
@@ -61,8 +59,6 @@ pub const MIB: u64 = 1024 * 1024;
 
 const JOURNAL_FILE: &str = "host-journal.redb";
 const SENTINEL_FILE: &str = "initialized";
-/// The retired format-1 journal table; see [`super::persist`].
-pub(crate) const JOURNAL: TableDefinition<u8, &[u8]> = super::persist::LEGACY_JOURNAL;
 /// Proxmox-side limit for a graceful guest shutdown task.
 const GUEST_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(600);
 /// Extra time the foreground `pvesh` gets beyond the guest limit, so the task
@@ -3148,9 +3144,6 @@ impl Host {
                     "helper journal is bound to a different pool GUID; refusing"
                 );
             }
-            // Migrate a format-1 journal only once it has validated as is, so
-            // the cold schema repair tool still applies to one that does not.
-            super::persist::migrate_journal(&database)?;
             super::persist::verify_journal(&database)?;
             let host = Self {
                 state_dir: config.state_dir.clone(),
