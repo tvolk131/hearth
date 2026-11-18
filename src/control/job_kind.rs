@@ -28,6 +28,9 @@ pub enum JobKind {
     FinishVmShrink,
     EnrollVm,
     RecoverOperation,
+    /// Remove the emptied dataset and Proxmox storage entry an adopted VM
+    /// kept after its verified deletion.
+    RetireAllocation,
     /// Helper-internal context for a migration step; never a queued job.
     Migration,
     /// Helper-internal context for read-only inspection; never a queued job.
@@ -35,7 +38,7 @@ pub enum JobKind {
 }
 
 impl JobKind {
-    pub const ALL: [JobKind; 16] = [
+    pub const ALL: [JobKind; 17] = [
         JobKind::Create,
         JobKind::CreateGuest,
         JobKind::Start,
@@ -50,6 +53,7 @@ impl JobKind {
         JobKind::FinishVmShrink,
         JobKind::EnrollVm,
         JobKind::RecoverOperation,
+        JobKind::RetireAllocation,
         JobKind::Migration,
         JobKind::Inspect,
     ];
@@ -70,6 +74,7 @@ impl JobKind {
             JobKind::FinishVmShrink => "finish_vm_shrink",
             JobKind::EnrollVm => "enroll_vm",
             JobKind::RecoverOperation => "recover_operation",
+            JobKind::RetireAllocation => "retire_allocation",
             JobKind::Migration => "migration",
             JobKind::Inspect => "inspect",
         }

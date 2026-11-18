@@ -17,6 +17,14 @@ Notes on what these entries refer to:
 
 ## Unreleased
 
+- Administrators can retire the storage a deleted adopted VM leaves behind
+  (`retire_storage`; `hearth vm retire-storage`; **Retire Storage** in the
+  app's Servers page). It removes the VM's Proxmox storage entry and then
+  destroys its emptied dataset non-recursively, freeing the reservation, after
+  rechecking the pinned identities and that nothing else uses either. The
+  helper journal records it on the machine record (`retirement`) and the
+  controller catalog in `retired_allocations`; both are optional fields, so
+  the storage format stays at 2.
 - The app now keeps reading a server while it has a queued or running
   operation, until that work finishes, even with auto-refresh off. Before this
   it read the server once after a change was accepted, so an operation that

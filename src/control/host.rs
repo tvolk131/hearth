@@ -280,6 +280,10 @@ pub enum Step {
     OwnerStorage,
     OwnerDataset,
     OwnerRelease,
+    RetireVerify,
+    RemoveStorage,
+    DestroyDataset,
+    RetireRelease,
 }
 
 impl Step {
@@ -320,6 +324,10 @@ impl Step {
             Step::OwnerStorage => "owner_storage",
             Step::OwnerDataset => "owner_dataset",
             Step::OwnerRelease => "owner_release",
+            Step::RetireVerify => "retire_verify",
+            Step::RemoveStorage => "remove_storage",
+            Step::DestroyDataset => "destroy_dataset",
+            Step::RetireRelease => "retire_release",
         }
     }
 
@@ -397,6 +405,12 @@ pub fn plan(kind: JobKind) -> Option<&'static [Step]> {
             Step::Unprotect,
             Step::Destroy,
             Step::Release,
+        ]),
+        JobKind::RetireAllocation => Some(&[
+            Step::RetireVerify,
+            Step::RemoveStorage,
+            Step::DestroyDataset,
+            Step::RetireRelease,
         ]),
         JobKind::Migration | JobKind::Inspect => None,
     }
@@ -619,6 +633,14 @@ pub fn validate_scope(journal: &Journal) -> Result<()> {
         }
         for (id, v) in &journal.machines {
             ensure!(
+                v.retirement
+                    .as_ref()
+                    .is_none_or(|r| m.adopted(*id).is_some()
+                        && v.state == MachineState::Deleted
+                        && valid_operation_id(&r.operation_id)),
+                "allocation retirement recorded for a machine that is not a deleted adoption"
+            );
+            ensure!(
                 *id == v.vm_id
                     && m.permits_vm(&v.owner, *id)
                     && (!journal.imported_vms.iter().any(|r| r.vm.vm_id == *id)
@@ -732,6 +754,28 @@ pub struct MachineRecord {
     pub identities: BTreeMap<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned_config: Option<Value>,
+    /// Retirement of a deleted adopted VM's allocation (its dataset and
+    /// Proxmox storage entry). Absent until a retirement passes verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retirement: Option<Retirement>,
+}
+
+/// Progress of [`JobKind::RetireAllocation`] for one adopted machine.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Retirement {
+    /// The retirement operation that owns the allocation's removal.
+    pub operation_id: String,
+    /// Both the storage entry and the dataset were verified absent.
+    pub retired: bool,
+}
+
+impl MachineRecord {
+    /// The adopted allocation was removed; its dataset and storage are
+    /// expected to be absent.
+    pub fn allocation_retired(&self) -> bool {
+        self.retirement.as_ref().is_some_and(|r| r.retired)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1017,6 +1061,10 @@ fn validate_with_limits(
     let expanded = expanded || incoming;
     let steps = plan(job.kind)
         .ok_or_else(|| anyhow!("unsupported helper operation kind {:?}", job.kind))?;
+    ensure!(
+        job.kind != JobKind::RetireAllocation,
+        "storage retirement applies only to a root-adopted managed allocation"
+    );
     let owner = &job.owner;
     if let Some(super::vm_change::JobExtension::IncomingMigration(plan)) = job.extension.as_deref()
     {
@@ -2515,7 +2563,7 @@ impl World {
                             .and_then(|v| v.parse::<u64>().ok())
                             .unwrap_or(0))
                     .to_string(),
-                    "quota" | "reservation" | "refreservation" => {
+                    "quota" | "reservation" | "refreservation" | "usedbydataset" => {
                         properties.get(*key).cloned().unwrap_or_else(|| "0".into())
                     }
                     _ => properties.get(*key).cloned().unwrap_or_else(|| "-".into()),
@@ -3964,6 +4012,7 @@ impl Host {
                 | JobKind::ShrinkVm
                 | JobKind::FinishVmShrink
                 | JobKind::RecoverOperation
+                | JobKind::RetireAllocation
                 | JobKind::Migration
                 | JobKind::Inspect => {}
             }
@@ -4183,6 +4232,15 @@ impl Host {
                                 ) && machine.delete_operation.as_deref()
                                     == Some(&context.operation_id))
                         }
+                        // Only a deleted adopted VM keeps an allocation to
+                        // retire, and only one retirement may own it.
+                        JobKind::RetireAllocation => {
+                            machine.state == MachineState::Deleted
+                                && context.adopted().is_some()
+                                && machine.retirement.as_ref().is_none_or(|r| {
+                                    !r.retired && r.operation_id == context.operation_id
+                                })
+                        }
                         JobKind::EnsureUser
                         | JobKind::DeleteUser
                         | JobKind::UpdateUserPolicy
@@ -4304,6 +4362,7 @@ impl Host {
                             state: MachineState::Creating,
                             identities: BTreeMap::new(),
                             pinned_config: None,
+                            retirement: None,
                         },
                     );
                 }
@@ -4360,6 +4419,12 @@ impl Host {
             Step::PolicyPreflight | Step::PolicyFirst | Step::PolicySecond | Step::PolicyCommit
         ) {
             return self.run_policy_step(context, step, &record).await;
+        }
+        if matches!(
+            step,
+            Step::RetireVerify | Step::RemoveStorage | Step::DestroyDataset | Step::RetireRelease
+        ) {
+            return self.run_retire_step(context, step, &record).await;
         }
         match step {
             Step::Preflight => return self.preflight(context, &record).await,
@@ -5051,7 +5116,11 @@ impl Host {
             | Step::OwnerPreflight
             | Step::OwnerStorage
             | Step::OwnerDataset
-            | Step::OwnerRelease => {
+            | Step::OwnerRelease
+            | Step::RetireVerify
+            | Step::RemoveStorage
+            | Step::DestroyDataset
+            | Step::RetireRelease => {
                 bail!("journal-only step has no observation")
             }
         }
@@ -5257,7 +5326,11 @@ impl Host {
             | Step::OwnerPreflight
             | Step::OwnerStorage
             | Step::OwnerDataset
-            | Step::OwnerRelease => {
+            | Step::OwnerRelease
+            | Step::RetireVerify
+            | Step::RemoveStorage
+            | Step::DestroyDataset
+            | Step::RetireRelease => {
                 bail!("journal-only step has no effect")
             }
         }

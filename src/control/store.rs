@@ -1,6 +1,6 @@
 use crate::control::JobKind;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -180,6 +180,16 @@ pub fn validate_scope(catalog: &Catalog) -> Result<()> {
         for r in catalog.operations.values() {
             m.validate_retained_job(&r.job, r.public.status.is_terminal())?;
         }
+        for id in &catalog.retired_allocations {
+            ensure!(
+                m.adopted(*id).is_some()
+                    && catalog
+                        .vms
+                        .get(id)
+                        .is_some_and(|vm| vm.state == VmState::Deleted),
+                "retired allocation does not belong to a deleted adopted VM"
+            );
+        }
         ensure!(
             catalog.disk_shrinks.is_empty()
                 && catalog.disk_growths.is_empty()
@@ -190,8 +200,8 @@ pub fn validate_scope(catalog: &Catalog) -> Result<()> {
         );
     } else {
         ensure!(
-            catalog.imported_vms.is_empty(),
-            "imported records require managed root binding"
+            catalog.imported_vms.is_empty() && catalog.retired_allocations.is_empty(),
+            "imported records and retired allocations require managed root binding"
         );
     }
     Ok(())
@@ -256,6 +266,10 @@ pub struct Catalog {
     pub enrollments: BTreeMap<u16, super::vm_change::EnrollmentSpec>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub migrations: BTreeMap<String, super::migration::TransferRecord>,
+    /// Deleted adopted VMs whose leftover dataset and storage entry were
+    /// verified removed by a retirement operation.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub retired_allocations: BTreeSet<u16>,
 }
 
 pub struct Store {
@@ -859,6 +873,7 @@ impl Store {
             disk_growths: BTreeMap::new(),
             enrollments: BTreeMap::new(),
             migrations: BTreeMap::new(),
+            retired_allocations: BTreeSet::new(),
         };
         catalog
             .users
@@ -998,12 +1013,12 @@ impl Store {
             if original.public.status!=OperationStatus::Blocked {return Err(failure("conflict","original operation is no longer blocked"));}
             let managed_kind=match kind {
                 super::vm_change::RecoveryKind::AcknowledgeFailedStart=>original.public.kind==JobKind::Start,
-                super::vm_change::RecoveryKind::AcknowledgeRefusal=>matches!(original.public.kind,JobKind::Start|JobKind::Shutdown|JobKind::Stop|JobKind::Delete),
+                super::vm_change::RecoveryKind::AcknowledgeRefusal=>matches!(original.public.kind,JobKind::Start|JobKind::Shutdown|JobKind::Stop|JobKind::Delete|JobKind::RetireAllocation),
                 _=>false,
             };
             let acknowledgment=matches!(kind,super::vm_change::RecoveryKind::AcknowledgeFailedStart|super::vm_change::RecoveryKind::AcknowledgeRefusal);
             if (catalog.binding.managed.is_some() && !managed_kind) || (catalog.binding.managed.is_none() && acknowledgment)
-            {return Err(failure("forbidden","managed recovery is limited to failed starts and to starts, stops, shutdowns and deletes refused before any effect"));}
+            {return Err(failure("forbidden","managed recovery is limited to failed starts and to starts, stops, shutdowns, deletes and storage retirements refused before any effect"));}
             let accepted=queue(catalog,&actor,request_id,&fingerprint,JobKind::RecoverOperation,original.job.owner.clone(),original.job.vm.clone());
             let id=accepted["operation_id"].as_str().expect("operation ID");
             catalog.operations.get_mut(id).expect("queued recovery").job.extension=Some(Box::new(super::vm_change::JobExtension::Recover(super::vm_change::RecoverySpec{operation_id:operation_id.into(),inspection_id:inspection_id.into(),kind})));
@@ -1058,6 +1073,7 @@ impl Store {
             .is_some_and(|m| !m.adopted_vms.is_empty())
         {
             values.push("manage_existing_vm".into());
+            values.push("retire_storage".into());
         }
         if binding.managed.is_some() {
             values.extend(
@@ -1347,6 +1363,24 @@ impl Store {
                     catalog.vms.insert(vm_id, vm.clone());
                     Ok(queue(catalog, &actor, &request_id, &fingerprint, kind, owner, Some(vm)))
                 }
+                Request::RetireStorage { request_id, vm_id, dataset, confirm_retire_storage } => {
+                    admin(&actor)?;
+                    if let Some(result) = retry(catalog, &actor, &request_id, &fingerprint)? { return Ok(result); }
+                    if !confirm_retire_storage { return Err(failure("invalid", "explicit storage retirement confirmation is required")); }
+                    let row = catalog.binding.managed.as_ref().and_then(|m| m.adopted(vm_id)).cloned()
+                        .ok_or_else(|| failure("forbidden", "storage retirement applies only to an adopted VM's allocation"))?;
+                    if row.dataset != dataset { return Err(failure("invalid", "dataset does not match the adopted VM's allocation")); }
+                    let vm = catalog.vms.get(&vm_id).cloned().ok_or_else(|| failure("internal", "adopted VM missing"))?;
+                    if catalog.retired_allocations.contains(&vm_id) { return Err(failure("conflict", "allocation was already retired")); }
+                    if vm.state != VmState::Deleted { return Err(failure("conflict", "delete the adopted VM before retiring its storage")); }
+                    if catalog.operations.values().any(|record| record.public.vm_id == Some(vm_id) && !record.public.status.is_terminal()) {
+                        return Err(failure("conflict", "VM has unfinished or blocked work"));
+                    }
+                    let owner = catalog.users.get(&vm.owner).filter(|u| u.state == AccountState::Active && u.ready).cloned()
+                        .ok_or_else(|| failure("conflict", "owner is inactive or being deleted"))?;
+                    if policy_busy(catalog, &vm.owner) { return Err(failure("conflict", "owner policy change is pending or blocked")); }
+                    Ok(queue(catalog, &actor, &request_id, &fingerprint, JobKind::RetireAllocation, owner, Some(vm)))
+                }
                 Request::VmAction { request_id, vm_id, kind } => {
                     let vm = catalog.vms.get(&vm_id).filter(|vm| visible(&actor, &vm.owner)).cloned()
                         .ok_or_else(|| failure("forbidden", "VM not found or forbidden"))?;
@@ -1463,6 +1497,10 @@ impl Store {
                         | JobKind::FinishVmShrink | JobKind::GrowVm | JobKind::EnrollVm => VmState::Stopped,
                         JobKind::Start => VmState::Running,
                         JobKind::Delete => VmState::Deleted,
+                        JobKind::RetireAllocation => {
+                            catalog.retired_allocations.insert(vm_id);
+                            VmState::Deleted
+                        }
                         JobKind::EnsureUser | JobKind::DeleteUser | JobKind::UpdateUserPolicy | JobKind::RecoverOperation
                         | JobKind::Migration | JobKind::Inspect => return Err(failure("internal", "unknown VM operation")),
                     };

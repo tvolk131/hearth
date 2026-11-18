@@ -1833,6 +1833,7 @@ mod tests {
             state: MachineState::Present,
             identities: BTreeMap::new(),
             pinned_config: None,
+            retirement: None,
         };
         let record = HostTransferRecord {
             plan,

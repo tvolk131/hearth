@@ -844,6 +844,278 @@ fn reviewed_refusal_cancels_a_blocked_delete_and_restores_the_vm() {
     assert_ne!(again["operation_id"], accepted["operation_id"]);
 }
 
+/// A store bound to the adoption fixture, with VM 101 adopted and running.
+fn adopted_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    Store,
+    String,
+    Binding,
+) {
+    let c: ManagedConfig =
+        serde_json::from_str(include_str!("fixtures/managed-adoption-config.json")).unwrap();
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("controller.redb");
+    let peer = iroh::SecretKey::generate().public().to_string();
+    let mut original = c.binding.clone();
+    original.adopted_vms.clear();
+    let mut b = binding(original);
+    b.environment = c.environment.clone();
+    let store = Store::create(&path, b.clone(), &peer).unwrap();
+    complete(&store);
+    store
+        .change(|catalog| {
+            catalog.binding.managed = Some(c.binding.clone());
+            catalog.vms.insert(101, c.binding.adopted_vms[0].vm.clone());
+            Ok(())
+        })
+        .unwrap();
+    b.managed = Some(c.binding);
+    (d, path, store, peer, b)
+}
+
+fn retire(request_id: &str, vm_id: u16, dataset: &str, confirm: bool) -> Request {
+    Request::RetireStorage {
+        request_id: request_id.into(),
+        vm_id,
+        dataset: dataset.into(),
+        confirm_retire_storage: confirm,
+    }
+}
+
+#[test]
+fn deleted_adopted_vm_storage_is_retired_through_the_controller() {
+    use hearth::control::JobKind;
+    let (_dir, path, store, peer, b) = adopted_fixture();
+    let dataset = b.managed.as_ref().unwrap().adopted_vms[0].dataset.clone();
+    let dashboard = store.handle(&peer, Request::Dashboard {}).unwrap();
+    assert!(
+        dashboard["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("retire_storage"))
+    );
+    // Retirement never folds into delete: a live adopted VM is refused.
+    let live = store
+        .handle(&peer, retire("too-early", 101, &dataset, true))
+        .unwrap_err();
+    assert_eq!(live.code, "conflict");
+    store
+        .handle(
+            &peer,
+            Request::VmAction {
+                request_id: "delete-adopted".into(),
+                vm_id: 101,
+                kind: VmAction::Delete,
+            },
+        )
+        .unwrap();
+    complete(&store);
+    let catalog = store.read().unwrap();
+    assert_eq!(catalog.vms[&101].state, VmState::Deleted);
+    assert!(catalog.retired_allocations.is_empty());
+    // The deleted VM's allocation is still listed and still holds its
+    // reservation until it is retired.
+    let dashboard = store.handle(&peer, Request::Dashboard {}).unwrap();
+    assert!(
+        dashboard["storage_allocations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["dataset"] == dataset.as_str())
+    );
+    assert_eq!(
+        store
+            .handle(&peer, retire("unconfirmed", 101, &dataset, false))
+            .unwrap_err()
+            .code,
+        "invalid"
+    );
+    assert_eq!(
+        store
+            .handle(
+                &peer,
+                retire("wrong-dataset", 101, "rpool/data/other", true)
+            )
+            .unwrap_err()
+            .code,
+        "invalid"
+    );
+    let accepted = store
+        .handle(&peer, retire("retire-adopted", 101, &dataset, true))
+        .unwrap();
+    let id = accepted["operation_id"].as_str().unwrap().to_string();
+    // An exact retry returns the same operation; a second request is busy.
+    let retried = store
+        .handle(&peer, retire("retire-adopted", 101, &dataset, true))
+        .unwrap();
+    assert_eq!(retried["operation_id"], id.as_str());
+    assert_eq!(
+        store
+            .handle(&peer, retire("retire-again", 101, &dataset, true))
+            .unwrap_err()
+            .code,
+        "conflict"
+    );
+    let record = store.read().unwrap().operations[&id].clone();
+    assert_eq!(record.public.kind, JobKind::RetireAllocation);
+    assert_eq!(record.job.vm.as_ref().unwrap().state, VmState::Deleted);
+    assert_eq!(store.read().unwrap().vms[&101].state, VmState::Deleted);
+    let host = helper(&b);
+    host.validate_job(&record.job).unwrap();
+    assert_eq!(
+        hearth::control::host::plan(record.job.kind).unwrap().len(),
+        4,
+        "verify, remove storage, destroy dataset, release"
+    );
+    complete(&store);
+    let catalog = store.read().unwrap();
+    assert_eq!(catalog.vms[&101].state, VmState::Deleted);
+    assert_eq!(catalog.retired_allocations, BTreeSet::from([101]));
+    validate_scope(&catalog).unwrap();
+    let dashboard = store.handle(&peer, Request::Dashboard {}).unwrap();
+    assert!(
+        !dashboard["storage_allocations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["dataset"] == dataset.as_str())
+    );
+    assert_eq!(
+        store
+            .handle(&peer, retire("retire-twice", 101, &dataset, true))
+            .unwrap_err()
+            .code,
+        "conflict"
+    );
+    // The retirement survives reopening the catalog.
+    drop(store);
+    let reopened = Store::open(&path, &b).unwrap();
+    assert_eq!(
+        reopened.read().unwrap().retired_allocations,
+        BTreeSet::from([101])
+    );
+}
+
+#[test]
+fn storage_retirement_refuses_live_and_non_adopted_vms() {
+    use hearth::control::JobKind;
+    let (_dir, _path, store, peer, b) = adopted_fixture();
+    let dataset = b.managed.as_ref().unwrap().adopted_vms[0].dataset.clone();
+    assert_eq!(
+        store
+            .handle(&peer, retire("live", 101, &dataset, true))
+            .unwrap_err()
+            .code,
+        "conflict"
+    );
+    // A VM created in the managed namespace has no adopted allocation.
+    let f = fixture(managed());
+    f.store.handle(&f.peer, create("alex", "plain-vm")).unwrap();
+    complete(&f.store);
+    f.store
+        .handle(
+            &f.peer,
+            Request::VmAction {
+                request_id: "plain-delete".into(),
+                vm_id: 9201,
+                kind: VmAction::Delete,
+            },
+        )
+        .unwrap();
+    complete(&f.store);
+    let refused = f
+        .store
+        .handle(&f.peer, retire("plain", 9201, &dataset, true))
+        .unwrap_err();
+    assert_eq!(refused.code, "forbidden");
+    // The helper refuses the same jobs even if a controller sent them.
+    let delete = f
+        .store
+        .read()
+        .unwrap()
+        .operations
+        .values()
+        .find(|r| r.public.kind == JobKind::Delete)
+        .unwrap()
+        .job
+        .clone();
+    let mut forged = delete;
+    forged.kind = JobKind::RetireAllocation;
+    assert!(helper(&f.binding).validate_job(&forged).is_err());
+    assert!(legacy_validate(&forged).is_err());
+    let mut live = store
+        .read()
+        .unwrap()
+        .operations
+        .values()
+        .next()
+        .unwrap()
+        .job
+        .clone();
+    live.kind = JobKind::RetireAllocation;
+    live.vm = Some(b.managed.as_ref().unwrap().adopted_vms[0].vm.clone());
+    live.owner = store.read().unwrap().users[&b.managed.as_ref().unwrap().admin_user].clone();
+    assert!(helper(&b).validate_job(&live).is_err());
+}
+
+#[test]
+fn reviewed_refusal_of_a_storage_retirement_keeps_the_vm_deleted() {
+    use hearth::control::vm_change::RecoveryKind;
+    let (_dir, _path, store, peer, b) = adopted_fixture();
+    let dataset = b.managed.as_ref().unwrap().adopted_vms[0].dataset.clone();
+    store
+        .handle(
+            &peer,
+            Request::VmAction {
+                request_id: "delete-adopted".into(),
+                vm_id: 101,
+                kind: VmAction::Delete,
+            },
+        )
+        .unwrap();
+    complete(&store);
+    let accepted = store
+        .handle(&peer, retire("first-retire", 101, &dataset, true))
+        .unwrap();
+    let id = accepted["operation_id"].as_str().unwrap();
+    store
+        .progress(
+            id,
+            OperationStatus::Blocked,
+            "retire_verify",
+            Some("allocation dataset has snapshots or bookmarks".into()),
+        )
+        .unwrap();
+    let recovered = store
+        .queue_reviewed_recovery(
+            &peer,
+            "ack-retire",
+            id,
+            &"a".repeat(64),
+            RecoveryKind::AcknowledgeRefusal,
+            true,
+        )
+        .unwrap();
+    let recovery_id = recovered["operation_id"].as_str().unwrap();
+    let recovery = store.read().unwrap().operations[recovery_id].job.clone();
+    helper(&b).validate_job(&recovery).unwrap();
+    store
+        .progress(recovery_id, OperationStatus::Verified, "complete", None)
+        .unwrap();
+    let catalog = store.read().unwrap();
+    assert_eq!(
+        catalog.operations[id].public.status,
+        OperationStatus::Cancelled
+    );
+    assert_eq!(catalog.vms[&101].state, VmState::Deleted);
+    assert!(catalog.retired_allocations.is_empty());
+    // Once the cause is fixed the retirement can be requested again.
+    store
+        .handle(&peer, retire("second-retire", 101, &dataset, true))
+        .unwrap();
+}
+
 #[test]
 fn refusal_acknowledgment_is_limited_to_managed_lifecycle_and_delete() {
     use hearth::control::vm_change::RecoveryKind;
