@@ -233,6 +233,7 @@ pub fn validate_catalog(c: &super::store::Catalog) -> anyhow::Result<()> {
                                         | JobKind::Shutdown
                                         | JobKind::Stop
                                         | JobKind::Delete
+                                        | JobKind::RetireAllocation
                                 )
                                 && original.job.owner == r.job.owner
                                 && original.job.vm == r.job.vm,
@@ -328,6 +329,7 @@ pub fn validate_journal(j: &super::host::Journal) -> anyhow::Result<()> {
                                         | JobKind::Shutdown
                                         | JobKind::Stop
                                         | JobKind::Delete
+                                        | JobKind::RetireAllocation
                                 )
                                 && original.job.vm == r.job.vm,
                             "helper refusal recovery differs from the exact managed operation"

@@ -322,6 +322,15 @@ pub enum Request {
         vm_id: u16,
         kind: VmAction,
     },
+    /// Administrator-only. Remove the leftover dataset and Proxmox storage
+    /// entry of an adopted VM whose deletion was verified. `dataset` must
+    /// name the allocation's dataset exactly, as a typed confirmation.
+    RetireStorage {
+        request_id: String,
+        vm_id: u16,
+        dataset: String,
+        confirm_retire_storage: bool,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

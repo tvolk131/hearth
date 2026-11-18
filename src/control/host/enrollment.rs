@@ -312,6 +312,7 @@ impl Host {
                         state: MachineState::Creating,
                         identities: BTreeMap::new(),
                         pinned_config: Some(config.clone()),
+                        retirement: None,
                     },
                 );
                 Ok(())

@@ -64,6 +64,7 @@ public struct MutationLedger: Codable, Hashable, Sendable {
       case .migration(let action): return action.vmId == vmId
       case .shrinkVm(let action): return action.vmId == vmId
       case .finishVmShrink(let action): return action.vmId == vmId
+      case .retireStorage(let action): return action.vmId == vmId
       default: return false
       }
     }

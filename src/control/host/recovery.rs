@@ -162,7 +162,7 @@ impl Host {
     /// Proves that a blocked managed operation never got past planning: no
     /// step recorded an intent, task receipt, identity or witness, the machine
     /// record is unchanged, and Proxmox runs no task for the VM.
-    async fn inspect_refusal(&self, context: &Context) -> Result<Value> {
+    pub(super) async fn inspect_refusal(&self, context: &Context) -> Result<Value> {
         ensure!(
             self.binding.managed.is_some(),
             "refusal acknowledgment requires a managed binding"
@@ -177,6 +177,9 @@ impl Host {
             "operation recorded progress; it was not refused before every effect"
         );
         self.binding.validate_job(&original.job)?;
+        if original.job.kind == JobKind::RetireAllocation {
+            return self.inspect_retirement_refusal(context, original).await;
+        }
         if let Some(machine) = journal.machines.get(&context.vm_id()) {
             ensure!(
                 machine.state == MachineState::Present
@@ -206,6 +209,35 @@ impl Host {
             "candidate_phases":{},"verified_phases":{},"abort_candidate":false,
             "refused_step":refused_step,"reason":original.error,"failure":original.failure,
             "vm_status":vm_status,"active_vm_tasks":false}),
+        )
+    }
+    /// A refused storage retirement changed nothing: the adopted VM stays
+    /// deleted and absent, and no retirement claim was recorded. Its dataset
+    /// and storage entry are left exactly as they are.
+    async fn inspect_retirement_refusal(
+        &self,
+        context: &Context,
+        original: &HostJob,
+    ) -> Result<Value> {
+        let journal = self.journal()?;
+        let machine = journal
+            .machines
+            .get(&context.vm_id())
+            .context("adopted machine missing")?;
+        ensure!(
+            machine.state == MachineState::Deleted && machine.retirement.is_none(),
+            "machine record changed after the refusal"
+        );
+        ensure!(
+            !self.vm_present(context).await?,
+            "VMID exists again; inspect it before acknowledging"
+        );
+        let refused_step = original.steps.first().map(|s| s.step.name()).unwrap_or("");
+        Ok(
+            json!({"classification":"refused_before_effect","acknowledge_refusal":true,
+            "candidate_phases":{},"verified_phases":{},"abort_candidate":false,
+            "refused_step":refused_step,"reason":original.error,"failure":original.failure,
+            "vm_status":"absent","active_vm_tasks":false}),
         )
     }
     pub(super) async fn inspect_operation(&self, id: &str) -> Result<Value> {
@@ -329,7 +361,12 @@ impl Host {
         );
         let mut target = self.original_context(&spec.operation_id)?;
         target.boot_id = self.check_host().await?;
-        self.verify_owner(&target).await?;
+        // A deleted adopted VM has no guest to verify, and a refused
+        // retirement may have been refused precisely because its allocation
+        // drifted; its refusal proof rechecks the machine record instead.
+        if target.kind != JobKind::RetireAllocation {
+            self.verify_owner(&target).await?;
+        }
         let full = self.recovery_probe(&target, false).await?;
         self.update_step(context, step, |_, r| {
             r.witness = Some(json!({"inspection":review,"full_verification":full}));
@@ -523,14 +560,19 @@ impl Host {
     }
 }
 
-/// A blocked start, shutdown, stop or delete whose steps never left planning:
+/// A blocked start, shutdown, stop, delete or storage retirement whose steps
+/// never left planning:
 /// the helper refused it before recording any intent, task, identity or
 /// witness, so nothing it governs can have changed.
 pub(super) fn refused_before_effect(job: &HostJob) -> bool {
     job.status == OperationStatus::Blocked
         && matches!(
             job.job.kind,
-            JobKind::Start | JobKind::Shutdown | JobKind::Stop | JobKind::Delete
+            JobKind::Start
+                | JobKind::Shutdown
+                | JobKind::Stop
+                | JobKind::Delete
+                | JobKind::RetireAllocation
         )
         && job.job.extension.is_none()
         && job.job.vm.is_some()
@@ -867,6 +909,19 @@ mod failed_start_tests {
         let mut unplanned = refused_delete();
         unplanned.steps.clear();
         assert!(!refused_before_effect(&unplanned));
+        // A storage retirement refused at its journal-only verification
+        // qualifies; once that verification commits its claim it does not.
+        let mut retire = refused_delete();
+        retire.job.kind = JobKind::RetireAllocation;
+        retire.steps = serde_json::from_value(json!([
+            {"step":"retire_verify","phase":"planned","boot_id":null,"upid":null,"identity":null,"witness":null},
+            {"step":"remove_storage","phase":"planned","boot_id":null,"upid":null,"identity":null,"witness":null},
+            {"step":"destroy_dataset","phase":"planned","boot_id":null,"upid":null,"identity":null,"witness":null},
+            {"step":"retire_release","phase":"planned","boot_id":null,"upid":null,"identity":null,"witness":null}]))
+        .unwrap();
+        assert!(refused_before_effect(&retire));
+        retire.steps[0].phase = Phase::Verified;
+        assert!(!refused_before_effect(&retire));
     }
 
     #[test]

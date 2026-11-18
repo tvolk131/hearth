@@ -6,6 +6,7 @@ import SwiftUI
 /// and is never requested for members.
 struct ServersView: View {
   @Environment(AppModel.self) private var model
+  @State private var retiring: RetireStorageTarget?
 
   var body: some View {
     ScrollView {
@@ -22,6 +23,7 @@ struct ServersView: View {
     }
     .navigationTitle("Servers")
     .task { model.refreshServers(onlyStale: true) }
+    .sheet(item: $retiring) { target in RetireStorageSheet(target: target) }
   }
 
   private func serverCard(_ server: ServerProfile) -> some View {
@@ -269,11 +271,35 @@ struct ServersView: View {
       if vms.isEmpty {
         Text("No active VMs in this allocation").font(.caption).foregroundStyle(.secondary)
       }
+      if let deleted = retirableVm(allocation, dashboard: dashboard),
+        let origin = model.origin(forServer: server.id)
+      {
+        HStack {
+          Text("\(deleted.name) · VM \(deleted.vmId) was deleted; this allocation still holds its reservation.")
+            .font(.caption).foregroundStyle(.secondary)
+          Spacer()
+          Button("Retire Storage…", role: .destructive) {
+            retiring = RetireStorageTarget(
+              serverName: server.name, origin: origin, vm: deleted, allocation: allocation,
+              reservedBytes: root?["reservation"].flatMap { UInt64($0) })
+          }
+          .disabled(model.isVmBusy(deleted.vmId, on: server.id))
+        }
+      }
       Text(
         "ZFS figures include filesystem and storage overhead. Written data is measured at the host, not free space inside the guest."
       )
       .font(.caption).foregroundStyle(.secondary)
     }.padding(12).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+  }
+
+  /// The deleted adopted VM whose leftover allocation this is, if it can be retired.
+  private func retirableVm(_ allocation: StorageAllocation, dashboard: DashboardResult?) -> Vm? {
+    guard let dashboard, allocation.vmIds.count == 1, let id = allocation.vmIds.first,
+      dashboard.retirableAllocation(forVm: id)?.id == allocation.id,
+      !dashboard.operations.contains(where: { $0.vmId == id && !$0.status.isTerminal })
+    else { return nil }
+    return dashboard.vms.first { $0.vmId == id }
   }
 
   private func bytes(_ value: String?) -> String {

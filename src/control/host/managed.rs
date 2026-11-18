@@ -417,6 +417,7 @@ mod tests {
                 state: MachineState::Present,
                 identities: BTreeMap::new(),
                 pinned_config: None,
+                retirement: None,
             },
         );
         assert!(validate_scope(&changed).is_err());
@@ -455,6 +456,7 @@ mod tests {
                 state: MachineState::Creating,
                 identities: BTreeMap::new(),
                 pinned_config: None,
+                retirement: None,
             },
         );
         assert!(admit_scope(&j, &c).is_err());

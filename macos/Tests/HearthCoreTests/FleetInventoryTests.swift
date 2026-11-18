@@ -51,6 +51,49 @@ struct FleetInventoryTests {
         #expect(d.namespaceVms.isEmpty)
     }
 
+    @Test func onlyADeletedAdoptedVmsAllocationCanBeRetired() throws {
+        var d = dashboard()
+        let retire = { (dataset: String, confirmed: Bool) in
+            RpcRequest.retireStorage(RetireStorageRequest(
+                requestId: UUID(), vmId: 101, dataset: dataset, confirmRetireStorage: confirmed))
+        }
+        // A live adopted VM keeps its allocation; retirement is never part of Delete.
+        #expect(d.retirableAllocation(forVm: 101) == nil)
+        #expect(d.requestIssue(retire("rpool/data/dev-erin", true), catalog: nil) != nil)
+        d.vms[0].state = .deleted
+        #expect(d.retirableAllocation(forVm: 101)?.dataset == "rpool/data/dev-erin")
+        #expect(d.requestIssue(retire("rpool/data/dev-erin", true), catalog: nil) == nil)
+        #expect(d.requestIssue(retire("rpool/data/other", true), catalog: nil) != nil)
+        #expect(d.requestIssue(retire("rpool/data/dev-erin", false), catalog: nil) != nil)
+        var missing = d; missing.capabilities.removeAll { $0 == "retire_storage" }
+        #expect(missing.retirableAllocation(forVm: 101) == nil)
+        var member = d; member.identity.role = .member
+        #expect(member.retirableAllocation(forVm: 101) == nil)
+        // Once retired, the controller stops listing the allocation.
+        var retired = d; retired.storageAllocations.removeAll { !$0.acceptsNewVms }
+        #expect(retired.retirableAllocation(forVm: 101) == nil)
+        #expect(retired.requestIssue(retire("rpool/data/dev-erin", true), catalog: nil) != nil)
+        // A namespace allocation is never retirable.
+        #expect(d.retirableAllocation(forVm: 9201) == nil)
+    }
+
+    @Test func retireStorageIsADestructiveAdministratorOperationOnTheWire() throws {
+        let id = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
+        let request = RpcRequest.retireStorage(RetireStorageRequest(
+            requestId: id, vmId: 103, dataset: "rpool/data/dev-daniel", confirmRetireStorage: true))
+        #expect(request.isMutation && request.isDestructive && request.requiresAdministrator && request.expectsOperation)
+        #expect(request.requestId == id)
+        #expect(request.requiredCapability == "retire_storage")
+        let bytes = try WireCoding.encodeRequest(request)
+        #expect(String(decoding: bytes, as: UTF8.self)
+            == #"{"action":"retire_storage","confirm_retire_storage":true,"dataset":"rpool/data/dev-daniel","request_id":"00000000-0000-4000-8000-000000000001","vm_id":103}"#)
+        #expect(try JSONDecoder().decode(RpcRequest.self, from: bytes) == request)
+        let other = RpcRequest.retireStorage(RetireStorageRequest(
+            requestId: UUID(), vmId: 103, dataset: "rpool/data/dev-daniel", confirmRetireStorage: true))
+        #expect(request.hasSameIntent(as: other))
+        #expect(OperationPresentation.title(for: "retire_allocation") == "Retire storage")
+    }
+
     @Test func hardwareInventoryIsAnAdministratorReadAndNeverAMutation() throws {
         #expect(!RpcRequest.hostInventory.isMutation)
         #expect(RpcRequest.hostInventory.requiresAdministrator)

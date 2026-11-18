@@ -94,7 +94,12 @@ pub fn allocations(catalog: &super::store::Catalog) -> Vec<StorageAllocation> {
             max_vms: user.max_vms,
         });
     }
-    for row in &binding.adopted_vms {
+    // A retired allocation's dataset and storage entry no longer exist.
+    for row in binding
+        .adopted_vms
+        .iter()
+        .filter(|row| !catalog.retired_allocations.contains(&row.vm.vm_id))
+    {
         result.push(StorageAllocation {
             id: row.storage.clone(),
             owner: row.vm.owner.clone(),
@@ -135,6 +140,7 @@ impl AdoptedVm {
                 }),
             )]),
             pinned_config: Some(self.configuration.clone()),
+            retirement: None,
         }
     }
     pub fn root_volume(&self) -> String {
@@ -331,11 +337,15 @@ impl AdoptedVm {
             && matches!(job.extension.as_deref(), Some(super::vm_change::JobExtension::Recover(spec))
                 if matches!(spec.kind, super::vm_change::RecoveryKind::AcknowledgeFailedStart | super::vm_change::RecoveryKind::AcknowledgeRefusal)
                     && host::valid_operation_id(&spec.operation_id) && host::valid_operation_id(&spec.inspection_id));
+        // Retirement removes only the allocation a verified deletion left
+        // behind, so it applies to a deleted adopted VM and nothing else.
+        let retirement = job.kind == JobKind::RetireAllocation && vm.state == VmState::Deleted;
         ensure!(
             (matches!(
                 job.kind,
                 JobKind::Start | JobKind::Shutdown | JobKind::Stop | JobKind::Delete
-            ) || recovery)
+            ) || recovery
+                || retirement)
                 && *vm == expected
                 && job.owner.user_id == binding.admin_user
                 && job.owner.role == super::protocol::Role::Admin

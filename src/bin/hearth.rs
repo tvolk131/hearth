@@ -296,6 +296,24 @@ enum VmCommand {
         )]
         confirm_delete: bool,
     },
+    /// Remove the leftover dataset and Proxmox storage entry of an adopted VM
+    /// that was already deleted (administrator only; frees its reservation).
+    RetireStorage {
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        vm_id: u16,
+        #[arg(
+            long,
+            help = "The allocation's exact ZFS dataset, e.g. rpool/data/dev-example"
+        )]
+        dataset: String,
+        #[arg(
+            long,
+            help = "Explicitly acknowledge removing this dataset and its storage entry"
+        )]
+        confirm_retire_storage: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -892,6 +910,23 @@ fn controller_request(command: Commands) -> Result<Request> {
                     request_id,
                     vm_id,
                     kind: VmAction::Delete,
+                }
+            }
+            VmCommand::RetireStorage {
+                request_id,
+                vm_id,
+                dataset,
+                confirm_retire_storage,
+            } => {
+                ensure!(
+                    confirm_retire_storage,
+                    "storage retirement requires --confirm-retire-storage; no request was sent"
+                );
+                Request::RetireStorage {
+                    request_id,
+                    vm_id,
+                    dataset,
+                    confirm_retire_storage,
                 }
             }
         },

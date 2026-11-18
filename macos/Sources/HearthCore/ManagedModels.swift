@@ -102,13 +102,23 @@ extension DashboardResult {
         "list_image_catalog": "list_image_catalog", "create_vm": "create_guest",
         "start": "start_new_vm", "shutdown": "shutdown_new_vm", "stop": "stop_new_vm", "delete": "delete_new_vm",
         "create_user": "create_user", "update_user_policy": "update_user_policy", "delete_user": "delete_empty_user",
-        "inspect_operation": "inspect_operation", "recover_operation": "recover_operation"
+        "inspect_operation": "inspect_operation", "recover_operation": "recover_operation",
+        "retire_storage": "retire_storage"
     ]
     public static let managedCapabilities = Set(managedCapabilityByAction.values)
 
     public func isManagedVm(_ id: UInt16) -> Bool {
         vms.contains(where: { $0.vmId == id }) && ((9201...9299).contains(id)
             || (supports("manage_existing_vm") && storageAllocations.contains(where: { !$0.acceptsNewVms && $0.vmIds.contains(id) })))
+    }
+
+    /// The allocation a deleted adopted VM still holds, when this administrator
+    /// can retire it. Retirement is never part of Delete.
+    public func retirableAllocation(forVm id: UInt16) -> StorageAllocation? {
+        guard backend == .managed, Permissions(identity: identity).isAdmin, supports("retire_storage"),
+              vms.contains(where: { $0.vmId == id && $0.state == .deleted }),
+              !importedVms.contains(where: { $0.vm.vmId == id }) else { return nil }
+        return storageAllocations.first { !$0.acceptsNewVms && $0.vmIds == [id] }
     }
 
     public func availableActions(for vm: Vm) -> [VmActionKind] {
@@ -137,6 +147,7 @@ extension DashboardResult {
         case .enrollVm(let v): target = v.vmId
         case .planVmGrowth(let id, _, _), .planVmShrink(let id, _, _), .planVmEnrollment(let id, _): target = id
         case .migration(let v): target = v.vmId
+        case .retireStorage(let v): target = v.vmId
         default: target = nil
         }
         if let target, importedVms.contains(where: { $0.vm.vmId == target }) {
@@ -194,6 +205,14 @@ extension DashboardResult {
                 return "Only acknowledgment of a proven failed managed start, or of a refusal before any change, is available on this controller."
             }
             capability = "recover_operation"
+        case .retireStorage(let value):
+            guard let allocation = retirableAllocation(forVm: value.vmId) else {
+                return "Only a deleted adopted VM's remaining allocation can be retired, by an administrator."
+            }
+            guard allocation.dataset == value.dataset, value.confirmRetireStorage else {
+                return "Confirm retiring exactly this allocation's dataset."
+            }
+            capability = "retire_storage"
         default: return "This action is unavailable on the managed controller."
         }
         guard supports(capability) else { return "This server has not enabled this action." }
