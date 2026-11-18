@@ -103,7 +103,7 @@ extension DashboardResult {
         "start": "start_new_vm", "shutdown": "shutdown_new_vm", "stop": "stop_new_vm", "delete": "delete_new_vm",
         "create_user": "create_user", "update_user_policy": "update_user_policy", "delete_user": "delete_empty_user",
         "inspect_operation": "inspect_operation", "recover_operation": "recover_operation",
-        "retire_storage": "retire_storage"
+        "retire_storage": "retire_storage", "delete_retires_storage": "delete_retires_storage"
     ]
     public static let managedCapabilities = Set(managedCapabilityByAction.values)
 
@@ -117,6 +117,17 @@ extension DashboardResult {
     public func retirableAllocation(forVm id: UInt16) -> StorageAllocation? {
         guard backend == .managed, Permissions(identity: identity).isAdmin, supports("retire_storage"),
               vms.contains(where: { $0.vmId == id && $0.state == .deleted }),
+              !importedVms.contains(where: { $0.vm.vmId == id }) else { return nil }
+        return storageAllocations.first { !$0.acceptsNewVms && $0.vmIds == [id] }
+    }
+
+    /// The allocation a delete of this adopted VM can also release, when this
+    /// administrator may ask for it: the VM is not deleted, its allocation is
+    /// still listed (retired allocations are not), and the server advertises
+    /// `delete_retires_storage`.
+    public func storageReleasableWithDelete(forVm id: UInt16) -> StorageAllocation? {
+        guard backend == .managed, Permissions(identity: identity).isAdmin, supports("delete_retires_storage"),
+              vms.contains(where: { $0.vmId == id && $0.state != .deleted }),
               !importedVms.contains(where: { $0.vm.vmId == id }) else { return nil }
         return storageAllocations.first { !$0.acceptsNewVms && $0.vmIds == [id] }
     }
@@ -185,6 +196,16 @@ extension DashboardResult {
             // an accepted request may already have changed it before its reply was lost.
             guard isManagedVm(value.vmId) else {
                 return "Only a VM bound to this controller can receive this action."
+            }
+            if value.retireStorage {
+                // Like the delete itself, a durable retry is not gated on the
+                // VM or allocation still being there; the server checks both.
+                guard value.kind == .delete, Permissions(identity: identity).isAdmin else {
+                    return "Only an administrator's delete can also release storage."
+                }
+                guard supports("delete_retires_storage") else {
+                    return "This server cannot release storage together with a delete."
+                }
             }
             capability = value.kind.rawValue
         case .createVm: capability = "create_vm"

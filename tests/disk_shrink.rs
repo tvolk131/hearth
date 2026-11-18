@@ -170,7 +170,8 @@ async fn prepared_guest_lifecycle_finish_and_quota_release_preserve_provenance()
                 Request::VmAction {
                     request_id: "delete-early".into(),
                     vm_id: 9001,
-                    kind: VmAction::Delete
+                    kind: VmAction::Delete,
+                    retire_storage: false,
                 }
             )
             .is_err()

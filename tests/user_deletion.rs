@@ -407,6 +407,7 @@ async fn users_with_stopped_running_pending_or_blocked_resources_cannot_be_delet
                 request_id: "start".into(),
                 vm_id: vm,
                 kind: VmAction::Start,
+                retire_storage: false,
             });
             lab.finish(&host).await;
         }
@@ -415,6 +416,7 @@ async fn users_with_stopped_running_pending_or_blocked_resources_cannot_be_delet
                 request_id: "blocked".into(),
                 vm_id: vm,
                 kind: VmAction::Start,
+                retire_storage: false,
             };
             let op = lab.call(request);
             lab.store
@@ -452,6 +454,7 @@ async fn explicit_verified_vm_deletion_is_required_and_its_history_is_preserved(
         request_id: "explicit-delete".into(),
         vm_id: vm,
         kind: VmAction::Delete,
+        retire_storage: false,
     });
     assert!(
         lab.store

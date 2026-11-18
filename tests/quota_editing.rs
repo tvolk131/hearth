@@ -134,7 +134,8 @@ async fn safe_growth_unused_contraction_and_subsequent_lifecycle_preserve_histor
                     Request::VmAction {
                         request_id: "during-action".into(),
                         vm_id: vmid,
-                        kind: VmAction::Start
+                        kind: VmAction::Start,
+                        retire_storage: false,
                     }
                 )
                 .is_err()
@@ -176,6 +177,7 @@ async fn safe_growth_unused_contraction_and_subsequent_lifecycle_preserve_histor
             request_id: id.into(),
             vm_id: vmid,
             kind,
+            retire_storage: false,
         });
         lab.finish(&host).await;
     }

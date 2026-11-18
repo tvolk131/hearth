@@ -295,6 +295,10 @@ enum VmCommand {
             help = "Explicitly acknowledge deletion of this lab VM and its disks"
         )]
         confirm_delete: bool,
+        /// After a verified delete of an adopted VM, also retire its storage
+        /// allocation, as retire-storage would (administrator only).
+        #[arg(long)]
+        retire_storage: bool,
     },
     /// Remove the leftover dataset and Proxmox storage entry of an adopted VM
     /// that was already deleted (administrator only; frees its reservation).
@@ -886,21 +890,25 @@ fn controller_request(command: Commands) -> Result<Request> {
                 request_id,
                 vm_id,
                 kind: VmAction::Start,
+                retire_storage: false,
             },
             VmCommand::Shutdown { request_id, vm_id } => Request::VmAction {
                 request_id,
                 vm_id,
                 kind: VmAction::Shutdown,
+                retire_storage: false,
             },
             VmCommand::Stop { request_id, vm_id } => Request::VmAction {
                 request_id,
                 vm_id,
                 kind: VmAction::Stop,
+                retire_storage: false,
             },
             VmCommand::Delete {
                 request_id,
                 vm_id,
                 confirm_delete,
+                retire_storage,
             } => {
                 ensure!(
                     confirm_delete,
@@ -910,6 +918,7 @@ fn controller_request(command: Commands) -> Result<Request> {
                     request_id,
                     vm_id,
                     kind: VmAction::Delete,
+                    retire_storage,
                 }
             }
             VmCommand::RetireStorage {
@@ -1735,6 +1744,34 @@ mod cli_tests {
             );
         }
         assert!(request(&["vm", "delete", "--request-id", "one", "--vm-id", "9001"]).is_err());
+    }
+
+    #[test]
+    fn delete_carries_retire_storage_only_when_asked() {
+        let base = ["vm", "delete", "--request-id", "one", "--vm-id", "101"];
+        let plain = request(&[&base[..], &["--confirm-delete"]].concat()).unwrap();
+        assert_eq!(
+            plain,
+            json!({"action":"vm_action","request_id":"one","vm_id":101,"kind":"delete"})
+        );
+        let retiring =
+            request(&[&base[..], &["--confirm-delete", "--retire-storage"]].concat()).unwrap();
+        assert_eq!(retiring["retire_storage"], true);
+        assert!(request(&[&base[..], &["--retire-storage"]].concat()).is_err());
+        for action in ["start", "stop", "shutdown"] {
+            assert!(
+                request(&[
+                    "vm",
+                    action,
+                    "--request-id",
+                    "one",
+                    "--vm-id",
+                    "101",
+                    "--retire-storage"
+                ])
+                .is_err()
+            );
+        }
     }
 
     #[test]

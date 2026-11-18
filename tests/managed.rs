@@ -261,7 +261,8 @@ fn imported_records_never_authorize_power_delete_resize_enroll_or_account_change
                     Request::VmAction {
                         request_id: format!("import-{kind:?}"),
                         vm_id: 103,
-                        kind
+                        kind,
+                        retire_storage: false,
                     }
                 )
                 .is_err()
@@ -647,6 +648,7 @@ fn reviewed_failed_start_cancellation_retains_allocation_and_exact_retry_identit
         request_id: "first-start".into(),
         vm_id: 9201,
         kind: VmAction::Start,
+        retire_storage: false,
     };
     let accepted = f.store.handle(&f.peer, start.clone()).unwrap();
     let id = accepted["operation_id"].as_str().unwrap();
@@ -779,6 +781,7 @@ fn reviewed_failed_start_cancellation_retains_allocation_and_exact_retry_identit
                 request_id: "new-start".into(),
                 vm_id: 9201,
                 kind: VmAction::Start,
+                retire_storage: false,
             },
         )
         .unwrap();
@@ -800,6 +803,7 @@ fn reviewed_refusal_cancels_a_blocked_delete_and_restores_the_vm() {
         request_id: request_id.into(),
         vm_id: 9201,
         kind: VmAction::Delete,
+        retire_storage: false,
     };
     let accepted = f.store.handle(&f.peer, delete("first-delete")).unwrap();
     let id = accepted["operation_id"].as_str().unwrap();
@@ -907,6 +911,7 @@ fn deleted_adopted_vm_storage_is_retired_through_the_controller() {
                 request_id: "delete-adopted".into(),
                 vm_id: 101,
                 kind: VmAction::Delete,
+                retire_storage: false,
             },
         )
         .unwrap();
@@ -1020,6 +1025,7 @@ fn storage_retirement_refuses_live_and_non_adopted_vms() {
                 request_id: "plain-delete".into(),
                 vm_id: 9201,
                 kind: VmAction::Delete,
+                retire_storage: false,
             },
         )
         .unwrap();
@@ -1071,6 +1077,7 @@ fn reviewed_refusal_of_a_storage_retirement_keeps_the_vm_deleted() {
                 request_id: "delete-adopted".into(),
                 vm_id: 101,
                 kind: VmAction::Delete,
+                retire_storage: false,
             },
         )
         .unwrap();
@@ -1114,6 +1121,471 @@ fn reviewed_refusal_of_a_storage_retirement_keeps_the_vm_deleted() {
     store
         .handle(&peer, retire("second-retire", 101, &dataset, true))
         .unwrap();
+}
+
+fn delete_and_retire(request_id: &str, vm_id: u16) -> Request {
+    Request::VmAction {
+        request_id: request_id.into(),
+        vm_id,
+        kind: VmAction::Delete,
+        retire_storage: true,
+    }
+}
+
+fn audit_events(store: &Store, event: &str) -> Vec<Value> {
+    store
+        .read_with_audit()
+        .unwrap()
+        .audit
+        .into_iter()
+        .filter(|entry| entry["event"] == event)
+        .collect()
+}
+
+#[test]
+fn delete_with_retire_storage_retires_the_allocation_once_the_delete_is_verified() {
+    use hearth::control::{JobKind, store::retirement_request_id};
+    let (_dir, path, store, peer, b) = adopted_fixture();
+    let dataset = b.managed.as_ref().unwrap().adopted_vms[0].dataset.clone();
+    let dashboard = store.handle(&peer, Request::Dashboard {}).unwrap();
+    assert!(
+        dashboard["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("delete_retires_storage"))
+    );
+    let accepted = store
+        .handle(&peer, delete_and_retire("delete-and-retire", 101))
+        .unwrap();
+    let delete_id = accepted["operation_id"].as_str().unwrap().to_string();
+    let catalog = store.read().unwrap();
+    assert_eq!(catalog.pending_retirements.len(), 1);
+    assert_eq!(catalog.pending_retirements[&delete_id].vm_id, 101);
+    assert_eq!(catalog.pending_retirements[&delete_id].dataset, dataset);
+    // The helper sees an ordinary delete: the follow-on is controller-only.
+    let delete_job = catalog.operations[&delete_id].job.clone();
+    assert_eq!(delete_job.kind, JobKind::Delete);
+    helper(&b).validate_job(&delete_job).unwrap();
+    validate_scope(&catalog).unwrap();
+    // An exact retry is the same operation; the same ID without the flag
+    // is a different request.
+    assert_eq!(
+        store
+            .handle(&peer, delete_and_retire("delete-and-retire", 101))
+            .unwrap()["operation_id"],
+        delete_id.as_str()
+    );
+    let without = store
+        .handle(
+            &peer,
+            Request::VmAction {
+                request_id: "delete-and-retire".into(),
+                vm_id: 101,
+                kind: VmAction::Delete,
+                retire_storage: false,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(without.code, "conflict");
+    // Running keeps the intent.
+    store
+        .progress(&delete_id, OperationStatus::Running, "destroy", None)
+        .unwrap();
+    assert_eq!(store.read().unwrap().pending_retirements.len(), 1);
+
+    complete(&store);
+    let catalog = store.read().unwrap();
+    assert_eq!(
+        catalog.operations[&delete_id].public.status,
+        OperationStatus::Verified
+    );
+    assert_eq!(catalog.vms[&101].state, VmState::Deleted);
+    assert!(catalog.pending_retirements.is_empty());
+    let request_id = retirement_request_id(&delete_id);
+    let retirement = catalog
+        .operations
+        .values()
+        .find(|r| r.public.kind == JobKind::RetireAllocation)
+        .unwrap()
+        .clone();
+    assert_eq!(retirement.public.request_id, request_id);
+    assert_eq!(retirement.public.status, OperationStatus::Queued);
+    assert_eq!(retirement.public.vm_id, Some(101));
+    assert_eq!(retirement.actor, catalog.operations[&delete_id].actor);
+    assert_eq!(retirement.job.vm.as_ref().unwrap().state, VmState::Deleted);
+    helper(&b).validate_job(&retirement.job).unwrap();
+    validate_scope(&catalog).unwrap();
+    let linked = audit_events(&store, "storage_retirement_queued_after_delete");
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0]["delete_operation_id"], delete_id.as_str());
+    assert_eq!(
+        linked[0]["operation_id"],
+        retirement.public.operation_id.as_str()
+    );
+    // The follow-on is exactly the retire_storage request it stands for.
+    assert_eq!(
+        store
+            .handle(&peer, retire(&request_id, 101, &dataset, true))
+            .unwrap()["operation_id"],
+        retirement.public.operation_id.as_str()
+    );
+    // Retrying the original delete still names the delete.
+    assert_eq!(
+        store
+            .handle(&peer, delete_and_retire("delete-and-retire", 101))
+            .unwrap()["operation_id"],
+        delete_id.as_str()
+    );
+
+    complete(&store);
+    let catalog = store.read().unwrap();
+    assert_eq!(
+        catalog.operations[&retirement.public.operation_id]
+            .public
+            .status,
+        OperationStatus::Verified
+    );
+    assert_eq!(catalog.retired_allocations, BTreeSet::from([101]));
+    assert_eq!(
+        catalog
+            .operations
+            .values()
+            .filter(|r| r.public.kind == JobKind::RetireAllocation)
+            .count(),
+        1
+    );
+    let dashboard = store.handle(&peer, Request::Dashboard {}).unwrap();
+    assert!(
+        !dashboard["storage_allocations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["dataset"] == dataset.as_str())
+    );
+    drop(store);
+    let reopened = Store::open(&path, &b).unwrap();
+    let catalog = reopened.read().unwrap();
+    assert_eq!(catalog.retired_allocations, BTreeSet::from([101]));
+    assert!(catalog.pending_retirements.is_empty());
+}
+
+#[test]
+fn delete_without_retire_storage_leaves_the_allocation() {
+    use hearth::control::JobKind;
+    let (_dir, _path, store, peer, _b) = adopted_fixture();
+    store
+        .handle(
+            &peer,
+            Request::VmAction {
+                request_id: "plain-delete".into(),
+                vm_id: 101,
+                kind: VmAction::Delete,
+                retire_storage: false,
+            },
+        )
+        .unwrap();
+    assert!(store.read().unwrap().pending_retirements.is_empty());
+    complete(&store);
+    complete(&store);
+    let catalog = store.read().unwrap();
+    assert_eq!(catalog.vms[&101].state, VmState::Deleted);
+    assert!(
+        !catalog
+            .operations
+            .values()
+            .any(|r| r.public.kind == JobKind::RetireAllocation)
+    );
+    assert!(catalog.retired_allocations.is_empty());
+    assert!(audit_events(&store, "storage_retirement_queued_after_delete").is_empty());
+}
+
+#[test]
+fn retire_storage_flag_is_refused_before_anything_is_queued() {
+    let (_dir, _path, store, peer, b) = adopted_fixture();
+    let dataset = b.managed.as_ref().unwrap().adopted_vms[0].dataset.clone();
+    let before = store.read().unwrap().operations.len();
+    for kind in [VmAction::Start, VmAction::Stop, VmAction::Shutdown] {
+        let refused = store
+            .handle(
+                &peer,
+                Request::VmAction {
+                    request_id: format!("flag-{kind:?}"),
+                    vm_id: 101,
+                    kind,
+                    retire_storage: true,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, "invalid", "{}", refused.message);
+    }
+    let catalog = store.read().unwrap();
+    assert_eq!(catalog.operations.len(), before);
+    assert!(catalog.pending_retirements.is_empty());
+    assert_eq!(catalog.vms[&101].state, VmState::Running);
+
+    // An already retired allocation cannot be retired again.
+    store
+        .handle(
+            &peer,
+            Request::VmAction {
+                request_id: "delete".into(),
+                vm_id: 101,
+                kind: VmAction::Delete,
+                retire_storage: false,
+            },
+        )
+        .unwrap();
+    complete(&store);
+    store
+        .handle(&peer, retire("retire", 101, &dataset, true))
+        .unwrap();
+    complete(&store);
+    assert_eq!(
+        store.read().unwrap().retired_allocations,
+        BTreeSet::from([101])
+    );
+    let before = store.read().unwrap().operations.len();
+    let refused = store
+        .handle(&peer, delete_and_retire("retired-again", 101))
+        .unwrap_err();
+    assert_eq!(refused.code, "conflict");
+    assert!(refused.message.contains("retired"), "{}", refused.message);
+    assert_eq!(store.read().unwrap().operations.len(), before);
+    assert!(store.read().unwrap().pending_retirements.is_empty());
+
+    // A VM created in the managed namespace has no adopted allocation.
+    let f = fixture(managed());
+    f.store.handle(&f.peer, create("alex", "plain-vm")).unwrap();
+    complete(&f.store);
+    let before = f.store.read().unwrap().operations.len();
+    let refused = f
+        .store
+        .handle(&f.peer, delete_and_retire("namespace", 9201))
+        .unwrap_err();
+    assert_eq!(refused.code, "forbidden");
+    let catalog = f.store.read().unwrap();
+    assert_eq!(catalog.operations.len(), before);
+    assert_eq!(catalog.vms[&9201].state, VmState::Stopped);
+    assert!(catalog.pending_retirements.is_empty());
+    assert!(
+        !f.store.handle(&f.peer, Request::Dashboard {}).unwrap()["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("delete_retires_storage"))
+    );
+}
+
+#[test]
+fn acknowledged_refusal_of_a_delete_drops_its_storage_retirement() {
+    use hearth::control::{JobKind, vm_change::RecoveryKind};
+    let (_dir, _path, store, peer, b) = adopted_fixture();
+    let accepted = store
+        .handle(&peer, delete_and_retire("refused-delete", 101))
+        .unwrap();
+    let id = accepted["operation_id"].as_str().unwrap().to_string();
+    store
+        .progress(
+            &id,
+            OperationStatus::Blocked,
+            "verify",
+            Some("allocation retains snapshots/bookmarks".into()),
+        )
+        .unwrap();
+    // A blocked delete keeps its intent until it is resolved.
+    assert!(store.read().unwrap().pending_retirements.contains_key(&id));
+    let recovered = store
+        .queue_reviewed_recovery(
+            &peer,
+            "ack-refused-delete",
+            &id,
+            &"a".repeat(64),
+            RecoveryKind::AcknowledgeRefusal,
+            true,
+        )
+        .unwrap();
+    let recovery_id = recovered["operation_id"].as_str().unwrap();
+    helper(&b)
+        .validate_job(&store.read().unwrap().operations[recovery_id].job)
+        .unwrap();
+    store
+        .progress(recovery_id, OperationStatus::Verified, "complete", None)
+        .unwrap();
+    let catalog = store.read().unwrap();
+    assert_eq!(
+        catalog.operations[&id].public.status,
+        OperationStatus::Cancelled
+    );
+    assert_eq!(catalog.vms[&101].state, VmState::Running);
+    assert!(catalog.pending_retirements.is_empty());
+    assert!(
+        !catalog
+            .operations
+            .values()
+            .any(|r| r.public.kind == JobKind::RetireAllocation)
+    );
+    let dropped = audit_events(&store, "storage_retirement_dropped_with_delete");
+    assert_eq!(dropped.len(), 1);
+    assert_eq!(dropped[0]["delete_operation_id"], id.as_str());
+    complete(&store);
+    assert!(
+        !store
+            .read()
+            .unwrap()
+            .operations
+            .values()
+            .any(|r| r.public.kind == JobKind::RetireAllocation)
+    );
+}
+
+#[test]
+fn rejected_delete_drops_its_storage_retirement() {
+    let (_dir, _path, store, peer, _b) = adopted_fixture();
+    let accepted = store
+        .handle(&peer, delete_and_retire("rejected-delete", 101))
+        .unwrap();
+    let id = accepted["operation_id"].as_str().unwrap();
+    assert!(store.reject(id, "refused before journaling").unwrap());
+    let catalog = store.read().unwrap();
+    assert_eq!(
+        catalog.operations[id].public.status,
+        OperationStatus::Failed
+    );
+    assert!(catalog.pending_retirements.is_empty());
+    assert_eq!(catalog.vms[&101].state, VmState::Running);
+}
+
+#[test]
+fn a_refused_follow_on_retirement_leaves_the_delete_verified() {
+    use hearth::control::JobKind;
+    // The helper refuses the retirement (here, a child dataset appeared after
+    // the delete): the delete stays verified and the allocation stays listed.
+    let (_dir, _path, store, peer, b) = adopted_fixture();
+    let dataset = b.managed.as_ref().unwrap().adopted_vms[0].dataset.clone();
+    let accepted = store
+        .handle(&peer, delete_and_retire("delete-then-refused", 101))
+        .unwrap();
+    let delete_id = accepted["operation_id"].as_str().unwrap().to_string();
+    complete(&store);
+    let retirement_id = store
+        .read()
+        .unwrap()
+        .operations
+        .values()
+        .find(|r| r.public.kind == JobKind::RetireAllocation)
+        .unwrap()
+        .public
+        .operation_id
+        .clone();
+    let reason = "retire step retire_verify: allocation dataset has child datasets";
+    store
+        .progress(
+            &retirement_id,
+            OperationStatus::Blocked,
+            "retire_verify",
+            Some(reason.into()),
+        )
+        .unwrap();
+    let catalog = store.read().unwrap();
+    assert_eq!(
+        catalog.operations[&delete_id].public.status,
+        OperationStatus::Verified
+    );
+    assert_eq!(
+        catalog.operations[&retirement_id].public.status,
+        OperationStatus::Blocked
+    );
+    assert_eq!(
+        catalog.operations[&retirement_id].public.error.as_deref(),
+        Some(reason)
+    );
+    // Like a refused manual retirement, it needs investigation; the
+    // acknowledgment restores the deleted state and keeps the allocation.
+    assert_eq!(catalog.vms[&101].state, VmState::Blocked);
+    let recovered = store
+        .queue_reviewed_recovery(
+            &peer,
+            "ack-follow-on",
+            &retirement_id,
+            &"a".repeat(64),
+            hearth::control::vm_change::RecoveryKind::AcknowledgeRefusal,
+            true,
+        )
+        .unwrap();
+    store
+        .progress(
+            recovered["operation_id"].as_str().unwrap(),
+            OperationStatus::Verified,
+            "complete",
+            None,
+        )
+        .unwrap();
+    let catalog = store.read().unwrap();
+    assert_eq!(
+        catalog.operations[&retirement_id].public.status,
+        OperationStatus::Cancelled
+    );
+    assert_eq!(catalog.vms[&101].state, VmState::Deleted);
+    assert!(catalog.retired_allocations.is_empty());
+    let dashboard = store.handle(&peer, Request::Dashboard {}).unwrap();
+    assert!(
+        dashboard["storage_allocations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["dataset"] == dataset.as_str())
+    );
+
+    // The controller refuses the follow-on itself (here, the owner is not
+    // ready): the delete is still verified, nothing is queued, and the
+    // audit log says why.
+    let (_dir, _path, store, peer, b) = adopted_fixture();
+    let accepted = store
+        .handle(&peer, delete_and_retire("delete-owner-busy", 101))
+        .unwrap();
+    let delete_id = accepted["operation_id"].as_str().unwrap().to_string();
+    store
+        .change(|catalog| {
+            catalog.users.get_mut("erin").unwrap().ready = false;
+            Ok(())
+        })
+        .unwrap();
+    complete(&store);
+    let catalog = store.read().unwrap();
+    assert_eq!(
+        catalog.operations[&delete_id].public.status,
+        OperationStatus::Verified
+    );
+    assert_eq!(catalog.vms[&101].state, VmState::Deleted);
+    assert!(catalog.pending_retirements.is_empty());
+    assert!(
+        !catalog
+            .operations
+            .values()
+            .any(|r| r.public.kind == JobKind::RetireAllocation)
+    );
+    let refused = audit_events(&store, "storage_retirement_not_queued_after_delete");
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0]["delete_operation_id"], delete_id.as_str());
+    assert!(
+        refused[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("owner is inactive")
+    );
+    // The allocation is left for a manual Retire Storage once the cause is fixed.
+    store
+        .change(|catalog| {
+            catalog.users.get_mut("erin").unwrap().ready = true;
+            Ok(())
+        })
+        .unwrap();
+    store
+        .handle(&peer, retire("manual-retire", 101, &dataset_of(&b), true))
+        .unwrap();
+}
+
+fn dataset_of(b: &Binding) -> String {
+    b.managed.as_ref().unwrap().adopted_vms[0].dataset.clone()
 }
 
 #[test]
