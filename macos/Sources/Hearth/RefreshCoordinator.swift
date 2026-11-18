@@ -13,6 +13,10 @@ final class RefreshCoordinator: ServerSessionLifecycle {
   private var refreshTasks: [UUID: Task<Void, Never>] = [:]
   private var pollingTasks: [UUID: Task<Void, Never>] = [:]
   private var inventoryTasks: [UUID: Task<Void, Never>] = [:]
+  private var followTasks: [UUID: Task<Void, Never>] = [:]
+  /// How often a server with queued or running operations is re-read, whatever
+  /// its auto-refresh setting. Tests shorten it.
+  var followInterval: Duration = .seconds(3)
 
   init(
     registry: ServerRegistry, routes: ServerRoutes, client: RpcClient,
@@ -189,6 +193,7 @@ final class RefreshCoordinator: ServerSessionLifecycle {
         session.lastRefreshedAt = Date()
         session.refreshFailure = nil
         session.backgroundPaused = false
+        self.followActiveOperations(id)
       case .failure(let error):
         if error != .cancelled {
           session.refreshFailure = error
@@ -244,6 +249,7 @@ final class RefreshCoordinator: ServerSessionLifecycle {
       sessions[origin.serverId]?.lastRefreshedAt = Date()
       sessions[origin.serverId]?.refreshFailure = nil
       sessions[origin.serverId]?.backgroundPaused = false
+      followActiveOperations(origin.serverId)
       return value
     } catch {
       if origin == registry.origin(forServer: origin.serverId), error != .cancelled {
@@ -275,6 +281,44 @@ final class RefreshCoordinator: ServerSessionLifecycle {
     }
     sessions[origin.serverId]?.imageCatalog = value
     return value
+  }
+
+  // MARK: Following active operations
+
+  /// Whether this server's last dashboard shows a queued or running operation.
+  func hasActiveOperations(_ id: UUID) -> Bool {
+    sessions[id]?.dashboard?.operations.contains { $0.status.isActive } == true
+  }
+  /// Whether the app is re-reading this server until its operations finish.
+  func isFollowing(_ id: UUID) -> Bool { followTasks[id] != nil }
+
+  /// A queued or running operation changes on the server without any further
+  /// request from this app, so keep reading that server until none remain.
+  /// Independent of auto-refresh; a failed read stops following, as it pauses
+  /// auto-refresh, until the next successful read. Blocked operations wait for
+  /// an administrator and are not followed.
+  private func followActiveOperations(_ id: UUID) {
+    guard followTasks[id] == nil, hasActiveOperations(id), let revision = sessions[id]?.revision
+    else { return }
+    followTasks[id] = Task { [weak self] in
+      defer { self?.endFollowing(id, revision: revision) }
+      while !Task.isCancelled {
+        guard let interval = self?.followInterval else { return }
+        do { try await Task.sleep(for: interval) } catch { return }
+        guard let self, let session = self.sessions[id], session.revision == revision,
+          !session.backgroundPaused, self.hasActiveOperations(id)
+        else { return }
+        self.refresh(id)
+      }
+    }
+  }
+
+  private func endFollowing(_ id: UUID, revision: UUID) {
+    // A reset already removed this task; never clear a replacement session's.
+    guard sessions[id]?.revision == revision else { return }
+    followTasks[id] = nil
+    // The last read may have shown new active work after the loop's final check.
+    if sessions[id]?.backgroundPaused == false { followActiveOperations(id) }
   }
 
   // MARK: Polling
@@ -311,6 +355,7 @@ final class RefreshCoordinator: ServerSessionLifecycle {
     refreshTasks.removeValue(forKey: id)?.cancel()
     inventoryTasks.removeValue(forKey: id)?.cancel()
     pollingTasks.removeValue(forKey: id)?.cancel()
+    followTasks.removeValue(forKey: id)?.cancel()
   }
   func pollingIntervalWillChange(_ id: UUID) {
     pollingTasks.removeValue(forKey: id)?.cancel()

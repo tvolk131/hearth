@@ -17,6 +17,12 @@ Notes on what these entries refer to:
 
 ## Unreleased
 
+- The app now keeps reading a server while it has a queued or running
+  operation, until that work finishes, even with auto-refresh off. Before this
+  it read the server once after a change was accepted, so an operation that
+  finished seconds later could look stuck at its last step until a manual
+  refresh. Blocked operations are not followed, and a failed read stops
+  following until the next successful read.
 - Managed recovery can now close a blocked start, shutdown, stop or delete
   that the helper refused before any step began (`acknowledge_refusal`;
   `hearth operations recover --kind acknowledge-refusal`). Before this, only
