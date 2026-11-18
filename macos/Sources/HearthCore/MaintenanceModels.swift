@@ -124,6 +124,7 @@ public enum OperationPresentation {
         case "grow_vm": "Expand virtual disk"
         case "enroll_vm": "Enroll virtual machine"
         case "migrate_vm": "Move virtual machine"
+        case "retire_allocation": "Retire storage"
         default: SafeText.sanitize(kind.replacingOccurrences(of: "_", with: " "), limit: 80)
         }
     }

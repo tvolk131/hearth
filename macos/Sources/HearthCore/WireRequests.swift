@@ -147,6 +147,19 @@ public struct FinishVmShrinkRequest: Hashable, Sendable {
     }
 }
 
+/// Remove the leftover dataset and Proxmox storage entry of a deleted adopted
+/// VM. `dataset` names the allocation exactly, as a typed confirmation.
+public struct RetireStorageRequest: Hashable, Sendable {
+    public var requestId: UUID
+    public var vmId: UInt16
+    public var dataset: String
+    public var confirmRetireStorage: Bool
+    public init(requestId: UUID, vmId: UInt16, dataset: String, confirmRetireStorage: Bool) {
+        self.requestId = requestId; self.vmId = vmId; self.dataset = dataset
+        self.confirmRetireStorage = confirmRetireStorage
+    }
+}
+
 public enum RpcRequest: Hashable, Sendable {
     case dashboard
     case hostInventory
@@ -163,6 +176,7 @@ public enum RpcRequest: Hashable, Sendable {
     case finishVmShrink(FinishVmShrinkRequest)
     case createVm(CreateVmRequest)
     case vmAction(VmActionRequest)
+    case retireStorage(RetireStorageRequest)
     case createUser(CreateUserRequest)
     case updateUserPolicy(UpdateUserPolicyRequest)
     case deleteUser(DeleteUserRequest)
@@ -186,6 +200,7 @@ public enum RpcRequest: Hashable, Sendable {
         case .finishVmShrink: "finish_vm_shrink"
         case .createVm: "create_vm"
         case .vmAction: "vm_action"
+        case .retireStorage: "retire_storage"
         case .createUser: "create_user"
         case .updateUserPolicy: "update_user_policy"
         case .deleteUser: "delete_user"
@@ -205,6 +220,7 @@ public enum RpcRequest: Hashable, Sendable {
         case .finishVmShrink(let value): value.requestId
         case .createVm(let value): value.requestId
         case .vmAction(let value): value.requestId
+        case .retireStorage(let value): value.requestId
         case .createUser(let value): value.requestId
         case .updateUserPolicy(let value): value.requestId
         case .deleteUser(let value): value.requestId
@@ -222,7 +238,7 @@ public enum RpcRequest: Hashable, Sendable {
     public var requiresAdministrator: Bool {
         switch self {
         case .hostInventory, .migration: true
-        case .createUser, .updateUserPolicy, .deleteUser, .enrollDevice, .revokeDevice, .shrinkVm, .finishVmShrink, .inspectOperation, .recoverOperation, .planVmGrowth, .growVm, .planVmShrink, .planVmEnrollment, .enrollVm: true
+        case .createUser, .updateUserPolicy, .deleteUser, .enrollDevice, .revokeDevice, .shrinkVm, .finishVmShrink, .inspectOperation, .recoverOperation, .planVmGrowth, .growVm, .planVmShrink, .planVmEnrollment, .enrollVm, .retireStorage: true
         default: false
         }
     }
@@ -238,6 +254,7 @@ public enum RpcRequest: Hashable, Sendable {
         case .planVmEnrollment: "plan_vm_enrollment"
         case .enrollVm: "enroll_vm"
         case .planVmShrink, .shrinkVm, .finishVmShrink: "shrink_vm"
+        case .retireStorage: "retire_storage"
         default: nil
         }
     }
@@ -247,14 +264,14 @@ public enum RpcRequest: Hashable, Sendable {
         case .migration(let value):
             switch value { case .start, .abort, .finish: true; default: false }
         case .vmAction(let value): value.kind == .delete || value.kind == .stop || value.kind == .shutdown
-        case .revokeDevice, .deleteUser, .shrinkVm, .finishVmShrink, .recoverOperation, .growVm, .enrollVm: true
+        case .revokeDevice, .deleteUser, .shrinkVm, .finishVmShrink, .recoverOperation, .growVm, .enrollVm, .retireStorage: true
         default: false
         }
     }
 
     public var expectsOperation: Bool {
         switch self {
-        case .createVm, .vmAction, .createUser, .updateUserPolicy, .deleteUser, .shrinkVm, .finishVmShrink, .recoverOperation, .growVm, .enrollVm: true
+        case .createVm, .vmAction, .createUser, .updateUserPolicy, .deleteUser, .shrinkVm, .finishVmShrink, .recoverOperation, .growVm, .enrollVm, .retireStorage: true
         default: false
         }
     }
@@ -268,6 +285,7 @@ public enum RpcRequest: Hashable, Sendable {
         case .enrollVm(var value): value.requestId = zero; return .enrollVm(value)
         case .shrinkVm(var value): value.requestId = zero; return .shrinkVm(value)
         case .finishVmShrink(var value): value.requestId = zero; return .finishVmShrink(value)
+        case .retireStorage(var value): value.requestId = zero; return .retireStorage(value)
         case .createVm(var value):
             value.requestId = zero
             return .createVm(value)
@@ -312,6 +330,8 @@ public enum RpcRequest: Hashable, Sendable {
             "Create VM \(value.name)" + (value.owner.map { " for \($0)" } ?? "")
         case .vmAction(let value):
             "\(value.kind.rawValue.capitalized) VM \(value.vmId)"
+        case .retireStorage(let value):
+            "Retire storage \(SafeText.sanitize(value.dataset, limit: 128)) of deleted VM \(value.vmId)"
         case .createUser(let value):
             "Create user \(value.userId)"
         case .deleteUser(let value):
@@ -363,6 +383,7 @@ extension RpcRequest: Codable {
         case operationId = "operation_id", inspectionId = "inspection_id", confirmRecovery = "confirm_recovery"
         case planId = "plan_id", confirmEnrollment = "confirm_enrollment"
         case rootPartitionUuid = "root_partition_uuid"
+        case dataset, confirmRetireStorage = "confirm_retire_storage"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -430,6 +451,11 @@ extension RpcRequest: Codable {
             try container.encode(WireUUID.string(value.requestId), forKey: .requestId)
             try container.encode(value.vmId, forKey: .vmId)
             try container.encode(value.kind, forKey: .kind)
+        case .retireStorage(let value):
+            try container.encode(WireUUID.string(value.requestId), forKey: .requestId)
+            try container.encode(value.vmId, forKey: .vmId)
+            try container.encode(value.dataset, forKey: .dataset)
+            try container.encode(value.confirmRetireStorage, forKey: .confirmRetireStorage)
         case .createUser(let value):
             try container.encode(WireUUID.string(value.requestId), forKey: .requestId)
             try container.encode(value.userId, forKey: .userId)
@@ -518,6 +544,11 @@ extension RpcRequest: Codable {
                     requestId: try requestId(),
                     vmId: try container.decode(UInt16.self, forKey: .vmId),
                     kind: try container.decode(VmActionKind.self, forKey: .kind)))
+        case "retire_storage":
+            self = .retireStorage(RetireStorageRequest(requestId: try requestId(),
+                vmId: try container.decode(UInt16.self, forKey: .vmId),
+                dataset: try container.decode(String.self, forKey: .dataset),
+                confirmRetireStorage: try container.decode(Bool.self, forKey: .confirmRetireStorage)))
         case "create_user":
             self = .createUser(
                 CreateUserRequest(
