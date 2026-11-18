@@ -17,6 +17,17 @@ Notes on what these entries refer to:
 
 ## Unreleased
 
+- Deleting an adopted VM can now also release its storage allocation in one
+  action: `retire_storage: true` on the delete request (`hearth vm delete
+  --retire-storage`; an **Also release its storage allocation** toggle, on by
+  default, in the app's delete confirmation on servers advertising
+  `delete_retires_storage`). Once the delete is verified the controller queues
+  the same `retire_storage` operation an administrator would send, under
+  request ID `retire-after-<delete operation ID>`; if that is refused the
+  delete still stands and the audit log says why. The intent is kept in the
+  controller catalog's optional `pending_retirements`, so the storage format
+  stays at 2, and the helper job and its fingerprint are unchanged. Requests
+  without the flag serialize and fingerprint as before.
 - `hearth-ops backup`, `verify` and `restore` again accept finished helper
   jobs whose stored fingerprint predates fingerprint versioning, as long as it
   matches that exact job. Since the versioned fingerprints, backups of both

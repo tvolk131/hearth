@@ -120,6 +120,8 @@ impl Store {
                 "operation_id": operation_id,
                 "reason": reason,
             }));
+            // A rejected delete never ran, so neither does its retirement.
+            super::store::drop_unfollowed_retirements(catalog);
             Ok(true)
         })
     }

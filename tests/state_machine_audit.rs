@@ -464,6 +464,7 @@ async fn bounded_lifecycle_model_preserves_claims_and_identity_across_lost_acks_
                         1 => VmAction::Start,
                         _ => VmAction::Stop,
                     },
+                    retire_storage: false,
                 }
             } else {
                 Request::CreateVm {

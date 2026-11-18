@@ -264,6 +264,7 @@ fn physical_shutdown_admission_matches_helper_and_advertised_scope_capabilities(
                     request_id: "start".into(),
                     vm_id,
                     kind: VmAction::Start,
+                    retire_storage: false,
                 },
             )
             .unwrap();
@@ -304,6 +305,7 @@ fn physical_shutdown_admission_matches_helper_and_advertised_scope_capabilities(
             request_id: "shutdown".into(),
             vm_id,
             kind: VmAction::Shutdown,
+            retire_storage: false,
         };
         let result = store.handle(&peer, request.clone());
         if allowed {
@@ -447,6 +449,7 @@ fn physical_shrink_finish_requires_the_exact_stopped_preparation_and_reviewed_ac
                 request_id: "start".into(),
                 vm_id,
                 kind: VmAction::Start,
+                retire_storage: false,
             },
         )
         .unwrap();
@@ -470,6 +473,7 @@ fn physical_shrink_finish_requires_the_exact_stopped_preparation_and_reviewed_ac
                 request_id: "shutdown".into(),
                 vm_id,
                 kind: VmAction::Shutdown,
+                retire_storage: false,
             },
         )
         .unwrap();

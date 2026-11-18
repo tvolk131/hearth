@@ -721,7 +721,8 @@ mod process {
                     Request::VmAction {
                         request_id: "early-start".into(),
                         vm_id: 9002,
-                        kind: VmAction::Start
+                        kind: VmAction::Start,
+                        retire_storage: false,
                     }
                 )
                 .is_err()
@@ -764,7 +765,8 @@ mod process {
                     Request::VmAction {
                         request_id: "old-start".into(),
                         vm_id: 9001,
-                        kind: VmAction::Start
+                        kind: VmAction::Start,
+                        retire_storage: false,
                     }
                 )
                 .is_err()

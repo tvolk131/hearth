@@ -102,6 +102,7 @@ fn adopted_vm_uses_its_allocation_without_consuming_the_new_namespace_budget() {
                 request_id: "adopted-start".into(),
                 vm_id: 101,
                 kind: VmAction::Start,
+                retire_storage: false,
             },
         )
         .unwrap();

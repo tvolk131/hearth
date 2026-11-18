@@ -190,6 +190,21 @@ pub fn validate_scope(catalog: &Catalog) -> Result<()> {
                 "retired allocation does not belong to a deleted adopted VM"
             );
         }
+        for (operation_id, pending) in &catalog.pending_retirements {
+            let delete = catalog
+                .operations
+                .get(operation_id)
+                .context("pending storage retirement names no operation")?;
+            ensure!(
+                delete.public.kind == JobKind::Delete
+                    && delete.public.vm_id == Some(pending.vm_id)
+                    && !delete.public.status.is_terminal()
+                    && m.adopted(pending.vm_id)
+                        .is_some_and(|row| row.dataset == pending.dataset)
+                    && !catalog.retired_allocations.contains(&pending.vm_id),
+                "pending storage retirement does not follow an unfinished delete of an unretired adopted VM"
+            );
+        }
         ensure!(
             catalog.disk_shrinks.is_empty()
                 && catalog.disk_growths.is_empty()
@@ -200,8 +215,10 @@ pub fn validate_scope(catalog: &Catalog) -> Result<()> {
         );
     } else {
         ensure!(
-            catalog.imported_vms.is_empty() && catalog.retired_allocations.is_empty(),
-            "imported records and retired allocations require managed root binding"
+            catalog.imported_vms.is_empty()
+                && catalog.retired_allocations.is_empty()
+                && catalog.pending_retirements.is_empty(),
+            "imported records and storage retirements require managed root binding"
         );
     }
     Ok(())
@@ -270,6 +287,21 @@ pub struct Catalog {
     /// verified removed by a retirement operation.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub retired_allocations: BTreeSet<u16>,
+    /// Storage retirements requested together with an adopted VM's delete,
+    /// keyed by the delete's operation ID. An entry is consumed when that
+    /// delete is verified, by queuing the retirement, and dropped if the
+    /// delete ends any other way.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_retirements: BTreeMap<String, PendingRetirement>,
+}
+
+/// The allocation an adopted VM's delete should retire once it is verified.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PendingRetirement {
+    pub vm_id: u16,
+    /// The adopted allocation's dataset, as `retire_storage` names it.
+    pub dataset: String,
 }
 
 pub struct Store {
@@ -753,6 +785,242 @@ fn queue(
     json!(public)
 }
 
+/// Queue the retirement of adopted VM `vm_id`'s allocation `dataset`. This is
+/// `retire_storage` after its administrator, retry and confirmation checks,
+/// shared with the retirement that follows a verified delete.
+fn accept_retirement(
+    catalog: &mut Catalog,
+    actor: &User,
+    request_id: &str,
+    fingerprint: &str,
+    vm_id: u16,
+    dataset: &str,
+) -> Result<Value, ApiError> {
+    let row = catalog
+        .binding
+        .managed
+        .as_ref()
+        .and_then(|m| m.adopted(vm_id))
+        .ok_or_else(|| {
+            failure(
+                "forbidden",
+                "storage retirement applies only to an adopted VM's allocation",
+            )
+        })?;
+    if row.dataset != dataset {
+        return Err(failure(
+            "invalid",
+            "dataset does not match the adopted VM's allocation",
+        ));
+    }
+    let vm = catalog
+        .vms
+        .get(&vm_id)
+        .cloned()
+        .ok_or_else(|| failure("internal", "adopted VM missing"))?;
+    if catalog.retired_allocations.contains(&vm_id) {
+        return Err(failure("conflict", "allocation was already retired"));
+    }
+    if vm.state != VmState::Deleted {
+        return Err(failure(
+            "conflict",
+            "delete the adopted VM before retiring its storage",
+        ));
+    }
+    if catalog
+        .operations
+        .values()
+        .any(|record| record.public.vm_id == Some(vm_id) && !record.public.status.is_terminal())
+    {
+        return Err(failure("conflict", "VM has unfinished or blocked work"));
+    }
+    let owner = catalog
+        .users
+        .get(&vm.owner)
+        .filter(|u| u.state == AccountState::Active && u.ready)
+        .cloned()
+        .ok_or_else(|| failure("conflict", "owner is inactive or being deleted"))?;
+    if policy_busy(catalog, &vm.owner) {
+        return Err(failure(
+            "conflict",
+            "owner policy change is pending or blocked",
+        ));
+    }
+    Ok(queue(
+        catalog,
+        actor,
+        request_id,
+        fingerprint,
+        JobKind::RetireAllocation,
+        owner,
+        Some(vm),
+    ))
+}
+
+/// Check a `retire_storage` flag on a VM action and name the allocation it
+/// would retire. Nothing is queued when this refuses.
+fn retirement_with_delete(
+    catalog: &Catalog,
+    actor: &User,
+    kind: &VmAction,
+    vm_id: u16,
+) -> Result<PendingRetirement, ApiError> {
+    if !matches!(kind, VmAction::Delete) {
+        return Err(failure("invalid", "retire_storage applies only to delete"));
+    }
+    admin(actor)?;
+    let row = catalog
+        .binding
+        .managed
+        .as_ref()
+        .and_then(|m| m.adopted(vm_id))
+        .ok_or_else(|| {
+            failure(
+                "forbidden",
+                "retire_storage applies only to an adopted VM's allocation",
+            )
+        })?;
+    if catalog.retired_allocations.contains(&vm_id) {
+        return Err(failure("conflict", "allocation was already retired"));
+    }
+    Ok(PendingRetirement {
+        vm_id,
+        dataset: row.dataset.clone(),
+    })
+}
+
+/// The request ID of the retirement that follows verified delete
+/// `delete_id`. Operation IDs are 64 hex digits, so this is a valid request
+/// ID, and one delete can only ever name one retirement.
+pub fn retirement_request_id(delete_id: &str) -> String {
+    format!("retire-after-{delete_id}")
+}
+
+/// Queue the retirement a verified delete carried, exactly as the delete's
+/// requester sending `retire_storage` would. A refusal leaves the delete
+/// verified and the allocation for a manual retirement; both outcomes are
+/// audited.
+fn queue_retirement_after_delete(
+    catalog: &mut Catalog,
+    delete_id: &str,
+    pending: PendingRetirement,
+) {
+    let request_id = retirement_request_id(delete_id);
+    let requester = catalog
+        .operations
+        .get(delete_id)
+        .map(|record| record.actor.clone())
+        .unwrap_or_default();
+    let outcome = (|| {
+        let actor = catalog
+            .users
+            .get(&requester)
+            .filter(|user| user.state == AccountState::Active)
+            .cloned()
+            .ok_or_else(|| failure("conflict", "the delete's requester is no longer active"))?;
+        admin(&actor)?;
+        let fingerprint = digest(&Request::RetireStorage {
+            request_id: request_id.clone(),
+            vm_id: pending.vm_id,
+            dataset: pending.dataset.clone(),
+            confirm_retire_storage: true,
+        });
+        if let Some(existing) = retry(catalog, &actor, &request_id, &fingerprint)? {
+            return Ok(existing);
+        }
+        let accepted = accept_retirement(
+            catalog,
+            &actor,
+            &request_id,
+            &fingerprint,
+            pending.vm_id,
+            &pending.dataset,
+        )?;
+        // The delete's verification must commit whatever happens here, and
+        // the catalog is revalidated before it does. Withdraw a follow-on the
+        // root binding would not retain rather than refuse the delete.
+        let id = accepted["operation_id"].as_str().unwrap_or_default();
+        let retained = match (&catalog.binding.managed, catalog.operations.get(id)) {
+            (Some(m), Some(record)) => m.validate_retained_job(&record.job, false),
+            _ => Err(anyhow::anyhow!("queued retirement is missing")),
+        };
+        if let Err(error) = retained {
+            catalog.operations.remove(id);
+            catalog
+                .requests
+                .remove(&format!("{}/{request_id}", actor.user_id));
+            if catalog
+                .audit
+                .last()
+                .is_some_and(|entry| entry["operation_id"] == id)
+            {
+                catalog.audit.pop();
+            }
+            return Err(failure(
+                "internal",
+                &format!("retirement job is outside the root binding: {error:#}"),
+            ));
+        }
+        Ok(accepted)
+    })();
+    match outcome {
+        Ok(accepted) => catalog.audit.push(json!({
+            "at": now(),
+            "actor": requester,
+            "event": "storage_retirement_queued_after_delete",
+            "delete_operation_id": delete_id,
+            "operation_id": accepted["operation_id"],
+            "request_id": request_id,
+            "vm_id": pending.vm_id,
+            "dataset": pending.dataset,
+        })),
+        Err(refused) => catalog.audit.push(json!({
+            "at": now(),
+            "actor": requester,
+            "event": "storage_retirement_not_queued_after_delete",
+            "delete_operation_id": delete_id,
+            "vm_id": pending.vm_id,
+            "dataset": pending.dataset,
+            "reason": format!("{}: {}", refused.code, refused.message),
+        })),
+    }
+}
+
+/// Drop the storage retirements whose delete ended other than verified
+/// (cancelled, failed, or gone). A blocked delete keeps its entry until it is
+/// resolved.
+pub(super) fn drop_unfollowed_retirements(catalog: &mut Catalog) {
+    let ended: Vec<_> = catalog
+        .pending_retirements
+        .keys()
+        .filter(|id| {
+            catalog
+                .operations
+                .get(*id)
+                .is_none_or(|record| record.public.status.is_terminal())
+        })
+        .cloned()
+        .collect();
+    for delete_id in ended {
+        let pending = catalog
+            .pending_retirements
+            .remove(&delete_id)
+            .expect("listed pending retirement");
+        let status = catalog
+            .operations
+            .get(&delete_id)
+            .map(|record| record.public.status.clone());
+        catalog.audit.push(json!({
+            "at": now(),
+            "event": "storage_retirement_dropped_with_delete",
+            "delete_operation_id": delete_id,
+            "vm_id": pending.vm_id,
+            "dataset": pending.dataset,
+            "delete_status": status,
+        }));
+    }
+}
+
 impl Store {
     pub fn create(path: &Path, binding: Binding, admin_peer: &str) -> Result<Self> {
         ensure!(
@@ -874,6 +1142,7 @@ impl Store {
             enrollments: BTreeMap::new(),
             migrations: BTreeMap::new(),
             retired_allocations: BTreeSet::new(),
+            pending_retirements: BTreeMap::new(),
         };
         catalog
             .users
@@ -1074,6 +1343,7 @@ impl Store {
         {
             values.push("manage_existing_vm".into());
             values.push("retire_storage".into());
+            values.push("delete_retires_storage".into());
         }
         if binding.managed.is_some() {
             values.extend(
@@ -1367,24 +1637,13 @@ impl Store {
                     admin(&actor)?;
                     if let Some(result) = retry(catalog, &actor, &request_id, &fingerprint)? { return Ok(result); }
                     if !confirm_retire_storage { return Err(failure("invalid", "explicit storage retirement confirmation is required")); }
-                    let row = catalog.binding.managed.as_ref().and_then(|m| m.adopted(vm_id)).cloned()
-                        .ok_or_else(|| failure("forbidden", "storage retirement applies only to an adopted VM's allocation"))?;
-                    if row.dataset != dataset { return Err(failure("invalid", "dataset does not match the adopted VM's allocation")); }
-                    let vm = catalog.vms.get(&vm_id).cloned().ok_or_else(|| failure("internal", "adopted VM missing"))?;
-                    if catalog.retired_allocations.contains(&vm_id) { return Err(failure("conflict", "allocation was already retired")); }
-                    if vm.state != VmState::Deleted { return Err(failure("conflict", "delete the adopted VM before retiring its storage")); }
-                    if catalog.operations.values().any(|record| record.public.vm_id == Some(vm_id) && !record.public.status.is_terminal()) {
-                        return Err(failure("conflict", "VM has unfinished or blocked work"));
-                    }
-                    let owner = catalog.users.get(&vm.owner).filter(|u| u.state == AccountState::Active && u.ready).cloned()
-                        .ok_or_else(|| failure("conflict", "owner is inactive or being deleted"))?;
-                    if policy_busy(catalog, &vm.owner) { return Err(failure("conflict", "owner policy change is pending or blocked")); }
-                    Ok(queue(catalog, &actor, &request_id, &fingerprint, JobKind::RetireAllocation, owner, Some(vm)))
+                    accept_retirement(catalog, &actor, &request_id, &fingerprint, vm_id, &dataset)
                 }
-                Request::VmAction { request_id, vm_id, kind } => {
+                Request::VmAction { request_id, vm_id, kind, retire_storage } => {
                     let vm = catalog.vms.get(&vm_id).filter(|vm| visible(&actor, &vm.owner)).cloned()
                         .ok_or_else(|| failure("forbidden", "VM not found or forbidden"))?;
                     if let Some(result) = retry(catalog, &actor, &request_id, &fingerprint)? { return Ok(result); }
+                    let retirement = if retire_storage { Some(retirement_with_delete(catalog, &actor, &kind, vm_id)?) } else { None };
                     if vm.state == VmState::Deleted || catalog.operations.values().any(|record| record.public.vm_id == Some(vm_id) && !record.public.status.is_terminal()) {
                         return Err(failure("conflict", "VM is deleted, busy, or blocked pending investigation"));
                     }
@@ -1401,7 +1660,13 @@ impl Store {
                     if policy_busy(catalog, &vm.owner) && !shrink_lifecycle { return Err(failure("conflict", "owner policy change or disk shrink recovery is pending or blocked")); }
                     if kind == JobKind::Delete { catalog.vms.get_mut(&vm_id).expect("existing VM").state = VmState::Deleting; }
                     let owner = catalog.users[&vm.owner].clone();
-                    Ok(queue(catalog, &actor, &request_id, &fingerprint, kind, owner, Some(vm)))
+                    let accepted = queue(catalog, &actor, &request_id, &fingerprint, kind, owner, Some(vm));
+                    if let Some(pending) = retirement {
+                        let operation_id = accepted["operation_id"].as_str().expect("operation ID").to_string();
+                        catalog.audit.push(json!({"at":now(),"actor":actor.user_id,"event":"storage_retirement_requested_with_delete","operation_id":operation_id,"vm_id":vm_id,"dataset":pending.dataset}));
+                        catalog.pending_retirements.insert(operation_id, pending);
+                    }
+                    Ok(accepted)
                 }
             }
         })
@@ -1486,6 +1751,7 @@ impl Store {
                     }
                 }
                 catalog.audit.push(json!({"at":now(),"event":"operation_reconciled","recovery_id":operation_id,"original_id":spec.operation_id,"kind":spec.kind}));
+                drop_unfollowed_retirements(catalog);
                 return Ok(());
             }
             if let Some(vm_id) = record.public.vm_id {
@@ -1540,6 +1806,14 @@ impl Store {
             if matches!(status, OperationStatus::Verified | OperationStatus::Blocked | OperationStatus::Cancelled) {
                 catalog.audit.push(json!({"at":now(),"event":"operation_terminal","operation_id":operation_id,"status":status}));
             }
+            // In the transaction that verifies the delete, so the follow-on
+            // is queued exactly once or not at all.
+            if status == OperationStatus::Verified
+                && let Some(pending) = catalog.pending_retirements.remove(operation_id)
+            {
+                queue_retirement_after_delete(catalog, operation_id, pending);
+            }
+            drop_unfollowed_retirements(catalog);
             Ok(())
         })
     }

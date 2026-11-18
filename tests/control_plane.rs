@@ -149,7 +149,8 @@ fn authorization_is_derived_from_authenticated_device_not_request_owner() {
                     Request::VmAction {
                         request_id: "foreign".into(),
                         vm_id,
-                        kind
+                        kind,
+                        retire_storage: false,
                     }
                 )
                 .unwrap_err()
@@ -294,6 +295,7 @@ fn deletion_retains_capacity_until_verified_and_vm_ids_are_never_reused() {
                 request_id: "delete".into(),
                 vm_id,
                 kind: VmAction::Delete,
+                retire_storage: false,
             },
         )
         .unwrap();
@@ -308,7 +310,8 @@ fn deletion_retains_capacity_until_verified_and_vm_ids_are_never_reused() {
                 Request::VmAction {
                     request_id: "racing-start".into(),
                     vm_id,
-                    kind: VmAction::Start
+                    kind: VmAction::Start,
+                    retire_storage: false,
                 }
             )
             .is_err()
@@ -370,7 +373,8 @@ fn blocked_uncertain_operations_keep_claims_and_prevent_conflicting_actions() {
                 Request::VmAction {
                     request_id: "delete-unknown".into(),
                     vm_id: created["vm_id"].as_u64().unwrap() as u16,
-                    kind: VmAction::Delete
+                    kind: VmAction::Delete,
+                    retire_storage: false,
                 }
             )
             .is_err()

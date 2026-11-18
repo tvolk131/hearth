@@ -321,6 +321,12 @@ pub enum Request {
         request_id: String,
         vm_id: u16,
         kind: VmAction,
+        /// Administrator-only, and only with `kind: delete` on an adopted VM
+        /// whose allocation is not retired: once the delete is verified, queue
+        /// a `retire_storage` of its allocation. Omitted when false, so
+        /// requests without it serialize, and fingerprint, as before.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        retire_storage: bool,
     },
     /// Administrator-only. Remove the leftover dataset and Proxmox storage
     /// entry of an adopted VM whose deletion was verified. `dataset` must
@@ -525,5 +531,62 @@ impl ImportedVm {
             "invalid imported resource display metadata"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vm_action_without_retire_storage_keeps_its_bytes_and_fingerprint() {
+        let old =
+            r#"{"action":"vm_action","request_id":"delete-adopted","vm_id":101,"kind":"delete"}"#;
+        let request: Request = serde_json::from_str(old).unwrap();
+        assert!(matches!(
+            request,
+            Request::VmAction {
+                retire_storage: false,
+                kind: VmAction::Delete,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_string(&request).unwrap(), old);
+        // Pinned before the flag existed: request de-duplication compares
+        // this digest with the one stored for the original request.
+        assert_eq!(
+            super::super::store::digest(&request),
+            "6472c8eeea894069decefc28241dd73da901b3862d6b50c949f0141cb47df60d"
+        );
+        let explicit: Request = serde_json::from_str(
+            r#"{"action":"vm_action","request_id":"delete-adopted","vm_id":101,"kind":"delete","retire_storage":false}"#,
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_string(&explicit).unwrap(), old);
+    }
+
+    #[test]
+    fn vm_action_with_retire_storage_round_trips_and_fingerprints_differently() {
+        let flagged = r#"{"action":"vm_action","request_id":"delete-adopted","vm_id":101,"kind":"delete","retire_storage":true}"#;
+        let request: Request = serde_json::from_str(flagged).unwrap();
+        assert!(matches!(
+            request,
+            Request::VmAction {
+                retire_storage: true,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_string(&request).unwrap(), flagged);
+        assert_ne!(
+            super::super::store::digest(&request),
+            "6472c8eeea894069decefc28241dd73da901b3862d6b50c949f0141cb47df60d"
+        );
+        assert!(
+            serde_json::from_str::<Request>(
+                r#"{"action":"vm_action","request_id":"r","vm_id":101,"kind":"delete","retire":true}"#
+            )
+            .is_err(),
+            "unknown fields stay refused"
+        );
     }
 }

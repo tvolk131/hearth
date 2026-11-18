@@ -94,6 +94,7 @@ fn vm_action(request_id: &str, vm_id: u16, kind: VmAction) -> Request {
         request_id: request_id.into(),
         vm_id,
         kind,
+        retire_storage: false,
     }
 }
 
