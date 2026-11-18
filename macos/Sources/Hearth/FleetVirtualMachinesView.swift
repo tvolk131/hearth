@@ -314,11 +314,36 @@ private struct FleetVmActionSheet: View {
   @State private var failure: String?
   @State private var sending = false
   @State private var attempted = false
+  /// Release the adopted VM's storage allocation after the delete; on by default.
+  @State private var releaseStorage = true
+  @State private var requestId = UUID()
   private var title: String {
     action.kind == .shutdown ? "Shut Down" : action.kind.rawValue.capitalized
   }
+  /// The allocation this delete can also release, if any.
+  private var releasable: StorageAllocation? {
+    guard action.kind == .delete else { return nil }
+    return model.dashboard(forServer: action.row.serverId)?
+      .storageReleasableWithDelete(forVm: action.row.vmId)
+  }
+  private var request: VmActionRequest {
+    .confirmed(
+      requestId: requestId, vmId: action.row.vmId, kind: action.kind,
+      releaseStorage: releaseStorage, offer: releasable)
+  }
   private var issue: String? {
-    model.actionIssue(for: action.row, kind: action.kind, origin: action.origin)
+    if let issue = model.actionIssue(for: action.row, kind: action.kind, origin: action.origin) {
+      return issue
+    }
+    guard request.retireStorage else { return nil }
+    return model.dashboard(forServer: action.row.serverId)?.requestIssue(
+      .vmAction(request), catalog: nil)
+  }
+  /// The allocation's reservation as last read from host inventory, else its budget.
+  private func reservation(_ allocation: StorageAllocation) -> String {
+    let reserved = model.inventory(forServer: action.row.serverId)?.datasets
+      .first { $0["name"] == allocation.dataset }?["reservation"].flatMap { UInt64($0) }
+    return reserved.map { Formatting.bytes($0) } ?? Formatting.mib(allocation.budgetMib)
   }
   private var required: String? { action.row.confirmationRequired(for: action.kind) }
   var body: some View {
@@ -333,7 +358,18 @@ private struct FleetVmActionSheet: View {
         ).foregroundStyle(.orange)
       }
       switch action.kind {
-      case .delete: Text("The VM and its disks will be permanently deleted.")
+      case .delete:
+        Text("The VM and its disks will be permanently deleted.")
+        if let releasable {
+          Toggle(isOn: $releaseStorage) {
+            Text(
+              "Also release its \(reservation(releasable)) storage allocation (\(releasable.dataset))")
+            Text(
+              "Frees the reservation in the pool once the delete is verified. The VM's data is already removed by the delete."
+            )
+          }
+          .toggleStyle(.checkbox).disabled(sending || attempted)
+        }
       case .stop: Text("Force the guest off. Running work inside it will be interrupted.")
       case .shutdown: Text("Request a clean shutdown. This operation never forces the guest off.")
       default:
@@ -394,9 +430,7 @@ private struct FleetVmActionSheet: View {
     Task {
       defer { sending = false }
       do throws(RpcFailure) {
-        _ = try await model.performMutation(
-          .vmAction(VmActionRequest(requestId: UUID(), vmId: action.row.vmId, kind: action.kind)),
-          origin: action.origin)
+        _ = try await model.performMutation(.vmAction(request), origin: action.origin)
         dismiss()
       } catch {
         // Rejections are final and configuration errors explain themselves;

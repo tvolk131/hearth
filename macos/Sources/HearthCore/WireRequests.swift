@@ -36,11 +36,25 @@ public struct VmActionRequest: Hashable, Sendable {
     public var requestId: UUID
     public var vmId: UInt16
     public var kind: VmActionKind
+    /// Delete only, administrator only: once the delete is verified, the
+    /// controller also retires the adopted VM's storage allocation. Sent only
+    /// when true, so other requests keep their exact wire form.
+    public var retireStorage: Bool
 
-    public init(requestId: UUID, vmId: UInt16, kind: VmActionKind) {
+    public init(requestId: UUID, vmId: UInt16, kind: VmActionKind, retireStorage: Bool = false) {
         self.requestId = requestId
         self.vmId = vmId
         self.kind = kind
+        self.retireStorage = retireStorage
+    }
+
+    /// The request a confirmation sheet sends. The flag is set only for a
+    /// delete that offered the release (`offer`) and kept it ticked.
+    public static func confirmed(
+        requestId: UUID, vmId: UInt16, kind: VmActionKind, releaseStorage: Bool, offer: StorageAllocation?
+    ) -> VmActionRequest {
+        VmActionRequest(requestId: requestId, vmId: vmId, kind: kind,
+            retireStorage: kind == .delete && offer != nil && releaseStorage)
     }
 }
 
@@ -238,6 +252,7 @@ public enum RpcRequest: Hashable, Sendable {
     public var requiresAdministrator: Bool {
         switch self {
         case .hostInventory, .migration: true
+        case .vmAction(let value) where value.retireStorage: true
         case .createUser, .updateUserPolicy, .deleteUser, .enrollDevice, .revokeDevice, .shrinkVm, .finishVmShrink, .inspectOperation, .recoverOperation, .planVmGrowth, .growVm, .planVmShrink, .planVmEnrollment, .enrollVm, .retireStorage: true
         default: false
         }
@@ -246,6 +261,7 @@ public enum RpcRequest: Hashable, Sendable {
     public var requiredCapability: String? {
         switch self {
         case .vmAction(let value) where value.kind == .shutdown: "shutdown"
+        case .vmAction(let value) where value.retireStorage: "delete_retires_storage"
         case .migration: "migration"
         case .inspectOperation: "inspect_operation"
         case .recoverOperation: "recover_operation"
@@ -328,6 +344,8 @@ public enum RpcRequest: Hashable, Sendable {
         case .finishVmShrink(let value): "Finish VM \(value.vmId) shrink and remove recovery disk"
         case .createVm(let value):
             "Create VM \(value.name)" + (value.owner.map { " for \($0)" } ?? "")
+        case .vmAction(let value) where value.retireStorage:
+            "Delete VM \(value.vmId) and release its storage allocation"
         case .vmAction(let value):
             "\(value.kind.rawValue.capitalized) VM \(value.vmId)"
         case .retireStorage(let value):
@@ -384,6 +402,7 @@ extension RpcRequest: Codable {
         case planId = "plan_id", confirmEnrollment = "confirm_enrollment"
         case rootPartitionUuid = "root_partition_uuid"
         case dataset, confirmRetireStorage = "confirm_retire_storage"
+        case retireStorage = "retire_storage"
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -451,6 +470,7 @@ extension RpcRequest: Codable {
             try container.encode(WireUUID.string(value.requestId), forKey: .requestId)
             try container.encode(value.vmId, forKey: .vmId)
             try container.encode(value.kind, forKey: .kind)
+            if value.retireStorage { try container.encode(true, forKey: .retireStorage) }
         case .retireStorage(let value):
             try container.encode(WireUUID.string(value.requestId), forKey: .requestId)
             try container.encode(value.vmId, forKey: .vmId)
@@ -543,7 +563,8 @@ extension RpcRequest: Codable {
                 VmActionRequest(
                     requestId: try requestId(),
                     vmId: try container.decode(UInt16.self, forKey: .vmId),
-                    kind: try container.decode(VmActionKind.self, forKey: .kind)))
+                    kind: try container.decode(VmActionKind.self, forKey: .kind),
+                    retireStorage: try container.decodeIfPresent(Bool.self, forKey: .retireStorage) ?? false))
         case "retire_storage":
             self = .retireStorage(RetireStorageRequest(requestId: try requestId(),
                 vmId: try container.decode(UInt16.self, forKey: .vmId),
