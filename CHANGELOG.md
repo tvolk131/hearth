@@ -17,6 +17,12 @@ Notes on what these entries refer to:
 
 ## Unreleased
 
+- `hearth-ops backup`, `verify` and `restore` again accept finished helper
+  jobs whose stored fingerprint predates fingerprint versioning, as long as it
+  matches that exact job. Since the versioned fingerprints, backups of both
+  production hosts failed with "mixed controller/helper frozen operation
+  payloads" (9 such jobs on pve1, 14 on pve2). Unfinished jobs still need the
+  current fingerprint.
 - Administrators can retire the storage a deleted adopted VM leaves behind
   (`retire_storage`; `hearth vm retire-storage`; **Retire Storage** in the
   app's Servers page). It removes the VM's Proxmox storage entry and then

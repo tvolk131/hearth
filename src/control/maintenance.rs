@@ -360,9 +360,14 @@ pub(crate) fn validate_pair(catalog: &Catalog, journal: &Journal) -> Result<()> 
             "controller operation key mismatch"
         );
         if let Some(job) = journal.jobs.get(id) {
+            // Builds before fingerprints were versioned stored the legacy form.
+            // Those jobs are all finished; it still has to match this exact job.
+            let stored = job.fingerprint == host::fingerprint(&job.job)?
+                || (job.status.is_terminal()
+                    && job.fingerprint == host::legacy_fingerprint(&job.job)?);
             ensure!(
                 job.job.operation_id == *id
-                    && job.fingerprint == host::fingerprint(&job.job)?
+                    && stored
                     && host::fingerprint(&job.job)? == host::fingerprint(&operation.job)?,
                 "mixed controller/helper frozen operation payloads"
             );
@@ -1844,6 +1849,67 @@ mod managed_backup_tests {
             data.payload.journal.imported_vms
         );
         assert!(data.payload.catalog.vms.is_empty() && data.payload.journal.machines.is_empty());
+    }
+
+    #[test]
+    fn finished_helper_jobs_may_keep_their_legacy_stored_fingerprint() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let (controller, helper, pins) = pair(&root);
+        let output = root.join("backup");
+        let receipt = backup(&controller, &helper, None, &output, &pins, true).unwrap();
+        let data = load(&output, &pins, &receipt.payload_sha256).unwrap();
+        let (catalog, mut journal) = (data.payload.catalog, data.payload.journal);
+        let operation = catalog
+            .operations
+            .values()
+            .next()
+            .expect("fixture operation");
+        let id = operation.public.operation_id.clone();
+        journal.jobs.insert(
+            id.clone(),
+            host::HostJob {
+                sequence: 1,
+                fingerprint: host::fingerprint(&operation.job).unwrap(),
+                job: operation.job.clone(),
+                status: OperationStatus::Verified,
+                step: "complete".into(),
+                error: None,
+                attempts: 1,
+                steps: Vec::new(),
+                started_at: None,
+                updated_at: None,
+                finished_at: None,
+                retry: None,
+                failure: None,
+            },
+        );
+        let with = |status: OperationStatus, legacy: Option<&str>| {
+            let (mut catalog, mut journal) = (catalog.clone(), journal.clone());
+            catalog.operations.get_mut(&id).unwrap().public.status = status.clone();
+            let job = journal.jobs.get_mut(&id).unwrap();
+            job.status = status;
+            if let Some(stored) = legacy {
+                job.fingerprint = stored.into();
+            }
+            validate_pair(&catalog, &journal)
+        };
+        let job = &journal.jobs[&id].job;
+        let legacy = host::legacy_fingerprint(job).unwrap();
+        assert_ne!(legacy, host::fingerprint(job).unwrap());
+        with(OperationStatus::Verified, None).unwrap();
+        with(OperationStatus::Verified, Some(&legacy)).unwrap();
+        with(OperationStatus::Cancelled, Some(&legacy)).unwrap();
+        // Anything else is still a mixed pair: an unrelated digest, or a
+        // legacy digest on work that has not finished.
+        let mut other = job.clone();
+        other.operation_id = "f".repeat(64);
+        let foreign = host::legacy_fingerprint(&other).unwrap();
+        assert!(with(OperationStatus::Verified, Some(&foreign)).is_err());
+        assert!(with(OperationStatus::Verified, Some(&"0".repeat(64))).is_err());
+        with(OperationStatus::Running, None).unwrap();
+        assert!(with(OperationStatus::Running, Some(&legacy)).is_err());
     }
 
     #[test]
